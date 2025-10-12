@@ -32,7 +32,7 @@ except ImportError as exc:  # pragma: no cover - runtime misconfiguration
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
 except ImportError as exc:  # pragma: no cover - runtime misconfiguration
     raise RuntimeError("The 'cryptography' package is required. Install it via `pip install cryptography`.") from exc
 
@@ -165,13 +165,10 @@ class KeyManager:
         ).decode("utf-8")
 
     def sign_challenge(self, challenge: str) -> str:
-        digest = hashes.Hash(hashes.SHA256())
-        digest.update(challenge.encode("utf-8"))
-        challenge_hash = digest.finalize()
         signature = self.private_key.sign(
-            challenge_hash,
+            challenge.encode("utf-8"),
             padding.PKCS1v15(),
-            utils.Prehashed(hashes.SHA256()),
+            hashes.SHA256(),
         )
         return base64.b64encode(signature).decode("ascii")
 
@@ -512,6 +509,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server-url", help="HTTP base URL of the OCR server (default env OCR_SERVER_URL)")
     parser.add_argument("--device-id", help="Override device identifier")
     parser.add_argument("--enqueue", metavar="IMAGE_PATH", help="Enqueue an image path and exit")
+    parser.add_argument(
+        "--process-image",
+        metavar="IMAGE_PATH",
+        help="Immediately process a single image (skips queue)",
+    )
     parser.add_argument("--log-level", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     parser.add_argument("--no-tts", action="store_true", help="Disable text-to-speech output")
     return parser.parse_args()
@@ -540,10 +542,20 @@ def main() -> None:
 
     if args.enqueue:
         enqueue_image(config, logger, args.enqueue)
-        return
+        if not args.process_image:
+            return
 
     client = OCRClient(config, logger)
     client.install_signal_handlers()
+
+    if args.process_image:
+        try:
+            client.ensure_authenticated()
+            client._process_image(args.process_image)
+        finally:
+            client.close()
+        return
+
     try:
         client.run()
     finally:

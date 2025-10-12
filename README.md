@@ -18,7 +18,8 @@ as Raspberry Pi Zero 2.
   uploads images, and pipes recognised text to TTS.
 
 - **`tts_pipeline.py`**  
-  Lightweight TTS helper that uses `espeak-ng` and optional BlueZ audio routing.
+  Lightweight TTS helper (defaults to the Bangla `bn` voice in `espeak-ng`) and
+  can route audio through ALSA/BlueZ when a Bluetooth headset is available.
 
 - **Other Helpers**  
   `take_image.py` captures camera stills; queue backends (POSIX message queue or filesystem) connect producers and the OCR client.
@@ -35,7 +36,7 @@ as Raspberry Pi Zero 2.
        libblas-dev liblapack-dev libatlas-base-dev tesseract-ocr
    ```
 
-   _`espeak-ng` and `alsa-utils` are optional if you do not plan to test TTS immediately._
+   _Install `espeak-ng` to access the Bangla (`bn`) voice used by the TTS pipeline; `alsa-utils` and `bluetooth` are only needed if you plan to play audio._
 
 2. **Python Dependencies**
 
@@ -70,7 +71,7 @@ SERVER_PORT=8080 python3 server.py > /tmp/bbocr_flask.log 2>&1 &
 Verify it is running:
 
 ```bash
-curl -s http://127.0.0.1:8080/healthz
+curl -s http://127.0.0.1:8080/health
 ```
 
 If the port is already in use, either kill the existing process:
@@ -93,6 +94,9 @@ python3 embedded_base/ocr_client.py --enqueue embedded_base/test_images/sample.j
 
 Repeat for every image you want processed.
 
+> **Quick check:** to process a single image immediately (without using the queue), run  
+> `python3 embedded_base/ocr_client.py --process-image embedded_base/test_images/sample.jpg --no-tts`
+
 ### 3. Run the OCR Client (without TTS)
 
 ```bash
@@ -103,7 +107,7 @@ The client will:
 
 1. Authenticate with the server (RSA challenge/response).
 2. Pull queued filenames, upload them via REST, and print the OCR text.
-3. Receive Gemini summaries (logged by the server and included in the JSON response).
+3. Receive Gemini Markdown refinements (logged by the server and included in the JSON response).
 
 Increase verbosity with `--log-level DEBUG` if you want to inspect full payloads.
 Press `Ctrl+C` to stop once the queue is empty.
@@ -116,11 +120,8 @@ Tail the server log to review Gemini summaries:
 tail -f /tmp/bbocr_flask.log
 ```
 
-Look for lines like:
-
-```*
-Gemini summary: ...
-```
+Look for lines mentioning Gemini. The server now sends the Bangla HTML output to
+Gemini and logs the returned Markdown after spelling/grammar corrections.
 
 ### 5. (Optional) Test TTS
 
@@ -130,7 +131,7 @@ To pipe recognised text into audio:
 python3 embedded_base/ocr_client.py --log-level INFO
 ```
 
-Ensure `tts_pipeline.py` can find `espeak-ng`; set Bluetooth variables if you want audio on a headset:
+Ensure `tts_pipeline.py` can find `espeak-ng` (Bangla voice `bn` is used by default); set Bluetooth variables if you want audio on a headset:
 
 ```bash
 export TTS_BLUETOOTH_MAC="AA:BB:CC:DD:EE:FF"

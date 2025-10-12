@@ -35,10 +35,11 @@ def configure_logging(level: str) -> logging.Logger:
 
 @dataclass
 class TTSConfig:
-    voice: str = os.getenv("TTS_VOICE", "en")
+    # espeak-ng provides a "bn" voice that works better for Bangla output.
+    voice: str = os.getenv("TTS_VOICE", "bn")
     rate: int = int(os.getenv("TTS_RATE", "165"))
     volume: int = int(os.getenv("TTS_VOLUME", "150"))  # 0-200 for espeak
-    espeak_cmd: str = os.getenv("TTS_ESPEAK_CMD", "espeak")
+    espeak_cmd: str = os.getenv("TTS_ESPEAK_CMD", "espeak-ng")
     aplay_cmd: str = os.getenv("TTS_APLAY_CMD", "aplay")
     audio_device: Optional[str] = os.getenv("TTS_AUDIO_DEVICE") or None
     bluetooth_mac: Optional[str] = os.getenv("TTS_BLUETOOTH_MAC") or None
@@ -56,9 +57,18 @@ class TTSPipeline:
 
     def _ensure_dependencies(self) -> None:
         if shutil.which(self.config.espeak_cmd) is None:
-            raise RuntimeError(
-                f"'{self.config.espeak_cmd}' not found. Install espeak-ng (sudo apt install espeak-ng)."
-            )
+            fallback = "espeak"
+            if self.config.espeak_cmd != fallback and shutil.which(fallback):
+                self.logger.warning(
+                    "'%s' not found; falling back to '%s'",
+                    self.config.espeak_cmd,
+                    fallback,
+                )
+                self.config.espeak_cmd = fallback
+            else:
+                raise RuntimeError(
+                    f"'{self.config.espeak_cmd}' not found. Install espeak-ng (sudo apt install espeak-ng)."
+                )
         if self.config.audio_device and shutil.which(self.config.aplay_cmd) is None:
             raise RuntimeError(
                 f"Audio device specified but '{self.config.aplay_cmd}' is missing. Install alsa-utils."
