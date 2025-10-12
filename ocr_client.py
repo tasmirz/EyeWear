@@ -32,7 +32,7 @@ except ImportError as exc:  # pragma: no cover - runtime misconfiguration
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
 except ImportError as exc:  # pragma: no cover - runtime misconfiguration
     raise RuntimeError("The 'cryptography' package is required. Install it via `pip install cryptography`.") from exc
 
@@ -167,10 +167,11 @@ class KeyManager:
     def sign_challenge(self, challenge: str) -> str:
         digest = hashes.Hash(hashes.SHA256())
         digest.update(challenge.encode("utf-8"))
+        challenge_hash = digest.finalize()
         signature = self.private_key.sign(
-            digest.finalize(),
+            challenge_hash,
             padding.PKCS1v15(),
-            hashes.SHA256(),
+            utils.Prehashed(hashes.SHA256()),
         )
         return base64.b64encode(signature).decode("ascii")
 
