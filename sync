@@ -1,0 +1,20 @@
+#!/bin/bash
+# sync_project.sh
+
+PROJECT_DIR=$(pwd)
+DEST="pi@raspberrypi.lan:/home/pi/EyeWear"
+
+
+# Convert .gitignore to rsync exclude format
+EXCLUDE_FILE=$(mktemp)
+grep -v '^#' "$PROJECT_DIR/.piignore" | grep -v '^$' > "$EXCLUDE_FILE"
+
+# Include .git directory and sync in the exclude list
+echo ".git/" >> "$EXCLUDE_FILE"
+echo "sync/" >> "$EXCLUDE_FILE"
+
+# Run rsync with excludes
+rsync -av --exclude-from="$EXCLUDE_FILE" "$PROJECT_DIR"/ "$DEST"
+
+# Clean up
+rm "$EXCLUDE_FILE"
