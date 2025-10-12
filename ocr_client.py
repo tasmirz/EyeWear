@@ -2,8 +2,9 @@
 Connection 
 1. There is priv, publ keys in ./keys
 2. request challenge from server, sign with priv key, send back
-3. server verifies with publ key
-4. Receive JWT token, server publ key
+3. checks if the public key is in mogodb
+4. server verifies with publ key
+5. Receive JWT token, server publ key
 
 
 
