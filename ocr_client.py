@@ -1,42 +1,19 @@
-# Original Tasks:
-# Connection:
-# 1. There is priv, publ keys in ./keys
-# 2. request challenge from server, sign with private key, send back
-# 2. checks if the public key in mongodb
-# 3. server verifies with publ key
-# 4. Receive JWT token, server public key
-# ===
-# 1. Receive image filename (message queue)
-# 2. Send image to OCR server, encrypt with server publ key
-# 3. Receive playable text (pipe to tts_pipeline.py)
-# 4. Ensure piped sequentially
-
 """
-<<<<<<< HEAD
-Secure OCR client pipeline.
-=======
-Connection 
-1. There is priv, publ keys in ./keys
-2. request challenge from server, sign with priv key, send back
-3. checks if the public key is in mogodb
-4. server verifies with publ key
-5. Receive JWT token, server publ key
->>>>>>> a076f64d4aff5ad26215e906a364fd04544668ce
+OCR client for the embedded pipeline.
 
-This client is responsible for:
-1. Establishing a WebSocket connection with the OCR server.
-2. Performing an RSA challenge–response handshake using keys located in ./keys.
-3. Receiving the server issued JWT and server public key.
-4. Reading image capture notifications from an inter-process queue.
-5. Encrypting outgoing image payloads with a server-provided public key.
-6. Forwarding the recognised text to the text-to-speech pipeline in order.
+Workflow
+--------
+1. Load/generate RSA keys from ./keys.
+2. POST /get_challenge with the public key, sign the challenge, obtain JWT.
+3. Watch the image queue (POSIX message queue if available, otherwise a simple
+   directory) for filenames to process.
+4. Upload images to /ocr and forward recognised text to the TTS pipeline.
 """
+
 from __future__ import annotations
 
 import argparse
-import asyncio
 import base64
-import json
 import logging
 import os
 import signal
@@ -46,99 +23,81 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
-import websockets
-from websockets import WebSocketClientProtocol
-from websockets.exceptions import ConnectionClosed
+try:
+    import requests
+except ImportError as exc:  # pragma: no cover - runtime misconfiguration
+    raise RuntimeError("The 'requests' package is required. Install it via `pip install requests`.") from exc
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-except ImportError as exc:  # pragma: no cover - fail fast with a helpful message
-    raise RuntimeError(
-        "The 'cryptography' package is required to run embedded_base/ocr_client.py"
-    ) from exc
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+except ImportError as exc:  # pragma: no cover - runtime misconfiguration
+    raise RuntimeError("The 'cryptography' package is required. Install it via `pip install cryptography`.") from exc
 
 
-def configure_logging(log_level: str) -> logging.Logger:
-    """Configure root logging once and return the module logger."""
-    level = getattr(logging, log_level.upper(), logging.INFO)
+# -----------------------------------------------------------------------------
+# Logging & configuration helpers
+# -----------------------------------------------------------------------------
+
+
+def configure_logging(level: str) -> logging.Logger:
+    numeric_level = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
-        level=level,
+        level=numeric_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     logger = logging.getLogger("ocr_client")
-    logger.setLevel(level)
+    logger.setLevel(numeric_level)
     return logger
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass
 class Config:
-    server_url: str = field(
-        default_factory=lambda: os.getenv("OCR_SERVER_URL", "ws://localhost:8765")
-    )
-    device_id: str = field(
-        default_factory=lambda: os.getenv("OCR_DEVICE_ID", "pi-ocr-device")
-    )
-    keys_dir: Path = field(
-        default_factory=lambda: Path(
-            os.getenv(
-                "OCR_KEYS_DIR",
-                Path(__file__).resolve().parent / "keys",
-            )
-        )
-    )
-    public_key_name: str = field(
-        default_factory=lambda: os.getenv("OCR_PUBLIC_KEY_NAME", "device_public.pem")
-    )
-    private_key_name: str = field(
-        default_factory=lambda: os.getenv("OCR_PRIVATE_KEY_NAME", "device_private.pem")
-    )
-    server_key_name: str = field(
-        default_factory=lambda: os.getenv("OCR_SERVER_KEY_NAME", "server_public.pem")
-    )
-    queue_name: str = field(
-        default_factory=lambda: os.getenv("OCR_IMAGE_QUEUE", "/ocr_image_queue")
-    )
-    queue_dir: Path = field(
-        default_factory=lambda: Path(
-            os.getenv(
-                "OCR_QUEUE_DIR",
-                Path(__file__).resolve().parent / "queue",
-            )
-        )
-    )
-    image_base_dir: Path = field(
-        default_factory=lambda: Path(
-            os.getenv("OCR_IMAGE_BASE_DIR", Path.cwd())
-        )
-    )
-    request_timeout: int = field(
-        default_factory=lambda: int(os.getenv("OCR_REQUEST_TIMEOUT", "30"))
-    )
-    reconnect_delay: int = field(
-        default_factory=lambda: int(os.getenv("OCR_RECONNECT_DELAY", "5"))
-    )
+    server_base_url: str = field(default_factory=lambda: os.getenv("OCR_SERVER_URL", "http://127.0.0.1:8080"))
+    device_id: str = field(default_factory=lambda: os.getenv("OCR_DEVICE_ID", "pi-ocr-device"))
+    keys_dir: Path = field(default_factory=lambda: Path(os.getenv("OCR_KEYS_DIR", Path(__file__).parent / "keys")))
+    public_key_name: str = field(default_factory=lambda: os.getenv("OCR_PUBLIC_KEY_NAME", "device_public.pem"))
+    private_key_name: str = field(default_factory=lambda: os.getenv("OCR_PRIVATE_KEY_NAME", "device_private.pem"))
+    server_key_name: str = field(default_factory=lambda: os.getenv("OCR_SERVER_KEY_NAME", "server_public.pem"))
+    queue_name: str = field(default_factory=lambda: os.getenv("OCR_IMAGE_QUEUE", "/ocr_image_queue"))
+    queue_dir: Path = field(default_factory=lambda: Path(os.getenv("OCR_QUEUE_DIR", Path(__file__).parent / "queue")))
+    image_base_dir: Path = field(default_factory=lambda: Path(os.getenv("OCR_IMAGE_BASE_DIR", Path.cwd())))
+    request_timeout: int = field(default_factory=lambda: int(os.getenv("OCR_REQUEST_TIMEOUT", "30")))
+    retry_delay: float = field(default_factory=lambda: float(os.getenv("OCR_RETRY_DELAY", "5")))
+    tts_enabled: bool = field(default_factory=lambda: _env_bool("OCR_TTS_ENABLED", True))
     tts_script: Path = field(
-        default_factory=lambda: Path(
-            os.getenv(
-                "TTS_PIPELINE_SCRIPT",
-                Path(__file__).resolve().parent / "tts_pipeline.py",
-            )
-        )
+        default_factory=lambda: Path(os.getenv("TTS_PIPELINE_SCRIPT", Path(__file__).parent / "tts_pipeline.py"))
     )
-    log_level: str = field(
-        default_factory=lambda: os.getenv("OCR_CLIENT_LOG_LEVEL", "INFO")
-    )
+    log_level: str = field(default_factory=lambda: os.getenv("OCR_CLIENT_LOG_LEVEL", "INFO"))
 
     def __post_init__(self) -> None:
+        self.server_base_url = self.server_base_url.rstrip("/")
         self.keys_dir = self.keys_dir.expanduser().resolve()
         self.queue_dir = self.queue_dir.expanduser().resolve()
         self.image_base_dir = self.image_base_dir.expanduser().resolve()
         self.tts_script = self.tts_script.expanduser().resolve()
         self.log_level = self.log_level.upper()
+
+    @property
+    def get_challenge_url(self) -> str:
+        return f"{self.server_base_url}/get_challenge"
+
+    @property
+    def auth_url(self) -> str:
+        return f"{self.server_base_url}/auth"
+
+    @property
+    def ocr_url(self) -> str:
+        return f"{self.server_base_url}/ocr"
 
     @property
     def private_key_path(self) -> Path:
@@ -153,85 +112,53 @@ class Config:
         return self.keys_dir / self.server_key_name
 
 
-class KeyManager:
-    """Manage the device RSA key pair and remote server public key."""
+# -----------------------------------------------------------------------------
+# Key management
+# -----------------------------------------------------------------------------
 
+
+class KeyManager:
     def __init__(self, config: Config, logger: logging.Logger) -> None:
         self.config = config
         self.logger = logger
-        self.private_key: rsa.RSAPrivateKey = None  # type: ignore[assignment]
-        self.public_key: rsa.RSAPublicKey = None  # type: ignore[assignment]
-        self.server_public_key: Optional[rsa.RSAPublicKey] = None
-        self._load_or_generate_keys()
+        self.private_key: rsa.RSAPrivateKey
+        self.public_key: rsa.RSAPublicKey
+        self.server_public_key: Optional[str] = None
+        self._ensure_keys()
 
-    def _load_or_generate_keys(self) -> None:
+    def _ensure_keys(self) -> None:
         self.config.keys_dir.mkdir(parents=True, exist_ok=True)
-        if (
-            not self.config.private_key_path.exists()
-            or not self.config.public_key_path.exists()
-        ):
-            self.logger.info(
-                "Generating RSA key pair for OCR client in %s", self.config.keys_dir
+        if not self.config.private_key_path.exists() or not self.config.public_key_path.exists():
+            self.logger.info("Generating device RSA key pair in %s", self.config.keys_dir)
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            self.config.private_key_path.write_bytes(
+                key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
             )
-            self._generate_keys()
-        self._load_device_keys()
-        self._load_server_key()
-
-    def _generate_keys(self) -> None:
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        private_bytes = key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-        public_bytes = key.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        self.config.private_key_path.write_bytes(private_bytes)
-        self.config.public_key_path.write_bytes(public_bytes)
-        try:
-            os.chmod(self.config.private_key_path, 0o600)
-        except PermissionError:
-            self.logger.debug(
-                "Skipping private key chmod; insufficient permissions on this platform"
+            self.config.public_key_path.write_bytes(
+                key.public_key().public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                )
             )
+            try:
+                os.chmod(self.config.private_key_path, 0o600)
+            except PermissionError:
+                self.logger.debug("Skipping chmod on private key (insufficient permissions)")
 
-    def _load_device_keys(self) -> None:
-        self.private_key = serialization.load_pem_private_key(
-            self.config.private_key_path.read_bytes(),
-            password=None,
-        )
-        self.public_key = serialization.load_pem_public_key(
-            self.config.public_key_path.read_bytes()
-        )
+        self.private_key = serialization.load_pem_private_key(self.config.private_key_path.read_bytes(), password=None)
+        self.public_key = serialization.load_pem_public_key(self.config.public_key_path.read_bytes())
 
-    def _load_server_key(self) -> None:
         if self.config.server_key_path.exists():
             try:
-                self.server_public_key = serialization.load_pem_public_key(
-                    self.config.server_key_path.read_bytes()
-                )
-                self.logger.debug(
-                    "Loaded cached server public key from %s",
-                    self.config.server_key_path,
-                )
-            except ValueError:
-                self.logger.warning(
-                    "Existing server public key at %s is invalid; ignoring",
-                    self.config.server_key_path,
-                )
+                self.server_public_key = self.config.server_key_path.read_text()
+            except OSError:
+                self.server_public_key = None
 
-    def set_server_public_key(self, pem: str, persist: bool = True) -> None:
-        """Accept a PEM encoded server key and optionally persist it."""
-        self.server_public_key = serialization.load_pem_public_key(pem.encode("utf-8"))
-        if persist:
-            self.config.server_key_path.write_text(pem)
-            self.logger.debug(
-                "Persisted server public key to %s", self.config.server_key_path
-            )
-
-    def get_public_key_pem(self) -> str:
+    def public_key_pem(self) -> str:
         return self.public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -240,74 +167,54 @@ class KeyManager:
     def sign_challenge(self, challenge: str) -> str:
         digest = hashes.Hash(hashes.SHA256())
         digest.update(challenge.encode("utf-8"))
-        challenge_hash = digest.finalize()
         signature = self.private_key.sign(
-            challenge_hash,
+            digest.finalize(),
             padding.PKCS1v15(),
-            utils.Prehashed(hashes.SHA256()),
+            hashes.SHA256(),
         )
         return base64.b64encode(signature).decode("ascii")
 
-    def encrypt_for_server(self, data: bytes) -> Dict[str, str]:
-        if not self.server_public_key:
-            raise RuntimeError("Server public key unavailable; cannot encrypt payload")
-        aes_key = AESGCM.generate_key(bit_length=256)
-        aesgcm = AESGCM(aes_key)
-        nonce = os.urandom(12)
-        ciphertext = aesgcm.encrypt(nonce, data, None)
-        encrypted_key = self.server_public_key.encrypt(
-            aes_key,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None,
-            ),
-        )
-        return {
-            "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
-            "nonce": base64.b64encode(nonce).decode("ascii"),
-            "encrypted_key": base64.b64encode(encrypted_key).decode("ascii"),
-            "enc_alg": "AES-256-GCM",
-            "key_alg": "RSA-OAEP",
-        }
+    def cache_server_public_key(self, pem: str) -> None:
+        self.server_public_key = pem
+        try:
+            self.config.server_key_path.write_text(pem)
+        except OSError as exc:
+            self.logger.warning("Unable to persist server public key: %s", exc)
+
+
+# -----------------------------------------------------------------------------
+# Queue backends
+# -----------------------------------------------------------------------------
 
 
 class ImageQueue:
-    """Abstraction over the image filename queue."""
-
     def __init__(self, config: Config, logger: logging.Logger) -> None:
         self.config = config
         self.logger = logger
-        self._backend = self._select_backend()
+        self._backend = self._choose_backend()
 
-    def _select_backend(self):
+    def _choose_backend(self):
         try:
             import posix_ipc  # type: ignore
 
-            self.logger.info(
-                "Using POSIX message queue backend at %s", self.config.queue_name
-            )
-            return _PosixQueueBackend(self.config.queue_name, self.logger)
+            self.logger.info("Using POSIX message queue backend (%s)", self.config.queue_name)
+            return _PosixQueueBackend(self.config.queue_name)
         except (ImportError, OSError):
-            self.logger.info(
-                "Using filesystem queue backend at %s", self.config.queue_dir
-            )
-            return _DirectoryQueueBackend(self.config.queue_dir, self.logger)
+            self.logger.info("Using filesystem queue backend (%s)", self.config.queue_dir)
+            return _DirectoryQueueBackend(self.config.queue_dir)
 
-    async def get(self) -> str:
-        return await self._backend.get()
+    def get(self) -> str:
+        return self._backend.get()
 
-    async def put(self, item: str) -> None:
-        await self._backend.put(item)
+    def put(self, value: str) -> None:
+        self._backend.put(value)
 
     def close(self) -> None:
         self._backend.close()
 
 
 class _PosixQueueBackend:
-    """POSIX message queue backend for image filenames."""
-
-    def __init__(self, name: str, logger: logging.Logger) -> None:
+    def __init__(self, name: str) -> None:
         import posix_ipc  # type: ignore
 
         self._posix = posix_ipc
@@ -320,25 +227,20 @@ class _PosixQueueBackend:
                 max_messages=64,
                 max_message_size=4096,
             )
-        self.logger = logger
         self._closed = False
 
-    async def get(self) -> str:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._receive_blocking)
-
-    def _receive_blocking(self) -> str:
+    def get(self) -> str:
         while True:
             try:
-                message, _ = self.queue.receive(timeout=1)
-                return message.decode("utf-8").strip()
+                message, _priority = self.queue.receive(timeout=1)
+                text = message.decode("utf-8").strip()
+                if text:
+                    return text
             except self._posix.BusyError:
                 continue
 
-    async def put(self, item: str) -> None:
-        payload = item.encode("utf-8")
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: self.queue.send(payload))
+    def put(self, value: str) -> None:
+        self.queue.send(value.encode("utf-8"))
 
     def close(self) -> None:
         if not self._closed:
@@ -350,65 +252,56 @@ class _PosixQueueBackend:
 
 
 class _DirectoryQueueBackend:
-    """Filesystem-backed queue for environments without POSIX IPC."""
-
-    def __init__(self, path: Path, logger: logging.Logger) -> None:
+    def __init__(self, path: Path) -> None:
         self.path = path
-        self.logger = logger
         self.path.mkdir(parents=True, exist_ok=True)
-        self.poll_interval = 0.5
 
-    async def get(self) -> str:
+    def get(self) -> str:
         while True:
             for candidate in sorted(self.path.glob("*.msg")):
                 try:
-                    content = candidate.read_text().strip()
+                    text = candidate.read_text().strip()
                     candidate.unlink(missing_ok=True)
                 except FileNotFoundError:
                     continue
-                if content:
-                    return content
-            await asyncio.sleep(self.poll_interval)
+                if text:
+                    return text
+            time.sleep(0.5)
 
-    async def put(self, item: str) -> None:
+    def put(self, value: str) -> None:
         filename = f"{time.time_ns()}_{uuid.uuid4().hex}.msg"
-        (self.path / filename).write_text(item)
+        (self.path / filename).write_text(value.strip())
 
     def close(self) -> None:
-        # No resources to release for the filesystem queue.
         return
 
 
-class TTSPipeline:
-    """Thin wrapper for piping recognised text into tts_pipeline.py."""
+# -----------------------------------------------------------------------------
+# TTS integration
+# -----------------------------------------------------------------------------
 
-    def __init__(self, script_path: Path, logger: logging.Logger) -> None:
+
+class TTSSink:
+    def __init__(self, script_path: Path, logger: logging.Logger, enabled: bool) -> None:
         self.script_path = script_path
         self.logger = logger
+        self.enabled = enabled
         self._process: Optional[subprocess.Popen[str]] = None
-        self._lock = asyncio.Lock()
 
-    async def speak(self, text: str) -> None:
-        if not text:
+    def speak(self, text: str) -> None:
+        clean = text.strip()
+        if not clean:
             return
-        async with self._lock:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._write_text, text)
 
-    def _write_text(self, text: str) -> None:
-        cleaned = text.strip()
-        if not cleaned:
+        if not self.enabled:
+            self.logger.info("TTS disabled. Text: %s", clean)
             return
 
         if not self.script_path.exists():
-            self.logger.warning(
-                "TTS pipeline script %s not found; falling back to console output",
-                self.script_path,
-            )
-            self.logger.info("TTS output: %s", cleaned)
+            self.logger.warning("TTS script %s not found. Text: %s", self.script_path, clean)
             return
 
-        if not self._process or self._process.poll() is not None:
+        if self._process is None or self._process.poll() is not None:
             try:
                 self._process = subprocess.Popen(
                     [sys.executable, str(self.script_path)],
@@ -419,18 +312,18 @@ class TTSPipeline:
                 )
             except Exception as exc:
                 self.logger.error("Failed to launch TTS pipeline: %s", exc)
-                self.logger.info("TTS output: %s", cleaned)
                 self._process = None
+                self.logger.info("TTS fallback output: %s", clean)
                 return
 
         assert self._process.stdin is not None
         try:
-            self._process.stdin.write(cleaned + "\n")
+            self._process.stdin.write(clean + "\n")
             self._process.stdin.flush()
         except (BrokenPipeError, ValueError) as exc:
-            self.logger.error("Failed to write to TTS pipeline: %s", exc)
-            self.logger.info("TTS output: %s", cleaned)
+            self.logger.error("Writing to TTS pipeline failed: %s", exc)
             self._process = None
+            self.logger.info("TTS fallback output: %s", clean)
 
     def close(self) -> None:
         if self._process and self._process.poll() is None:
@@ -443,327 +336,217 @@ class TTSPipeline:
         self._process = None
 
 
-class OCRClient:
-    """Main OCR client orchestrating authentication, queue handling, and TTS piping."""
+# -----------------------------------------------------------------------------
+# OCR client implementation
+# -----------------------------------------------------------------------------
 
+
+class OCRClient:
     def __init__(self, config: Config, logger: logging.Logger) -> None:
         self.config = config
         self.logger = logger
-        self.key_manager = KeyManager(config, logger)
-        self.image_queue = ImageQueue(config, logger)
-        self.tts_pipeline = TTSPipeline(config.tts_script, logger)
-        self.websocket: Optional[WebSocketClientProtocol] = None
+        self.keys = KeyManager(config, logger)
+        self.queue = ImageQueue(config, logger)
+        self.tts = TTSSink(config.tts_script, logger, config.tts_enabled)
+        self.session = requests.Session()
         self.token: Optional[str] = None
-        self.recv_task: Optional[asyncio.Task[None]] = None
-        self._pending_queue_task: Optional[asyncio.Task[str]] = None
-        self._stop_event = asyncio.Event()
-        self._connection_active = False
-        self.pending_requests: Dict[str, asyncio.Future] = {}
+        self.token_expiry: float = 0.0
+        self._stopped = False
 
-    async def run(self) -> None:
-        """Entry point for the client run loop with automatic reconnection."""
-        try:
-            while not self._stop_event.is_set():
-                try:
-                    await self._connect_and_authenticate()
-                    await self._consume_queue()
-                except asyncio.CancelledError:
-                    break
-                except Exception as exc:
-                    self.logger.error("OCR client error: %s", exc)
-                finally:
-                    await self._cleanup_connection()
-                    if not self._stop_event.is_set():
-                        await asyncio.sleep(self.config.reconnect_delay)
-        finally:
-            self.image_queue.close()
-            self.tts_pipeline.close()
+    # --------------------------- lifecycle ---------------------------------
+    def install_signal_handlers(self) -> None:
+        def _stop_handler(signum, _frame):
+            self.logger.info("Received signal %s; shutting down.", signum)
+            self.request_stop()
 
-    def stop(self) -> None:
-        if not self._stop_event.is_set():
-            self._stop_event.set()
-        if self._pending_queue_task:
-            self._pending_queue_task.cancel()
-
-    async def _connect_and_authenticate(self) -> None:
-        self.logger.info("Connecting to OCR server at %s", self.config.server_url)
-        self.websocket = await websockets.connect(self.config.server_url, max_size=None)
-        await self._perform_handshake()
-        self._connection_active = True
-        self.recv_task = asyncio.create_task(self._recv_loop())
-
-    async def _perform_handshake(self) -> None:
-        assert self.websocket is not None
-        init_message = {
-            "type": "auth_init",
-            "device_id": self.config.device_id,
-            "public_key": self.key_manager.get_public_key_pem(),
-        }
-        await self.websocket.send(json.dumps(init_message))
-        self.logger.debug("Sent auth_init message")
-
-        challenge_raw = await self.websocket.recv()
-        challenge_data = json.loads(challenge_raw)
-        if challenge_data.get("type") != "auth_challenge":
-            raise RuntimeError(f"Unexpected authentication response: {challenge_data}")
-
-        challenge = challenge_data.get("challenge")
-        if not isinstance(challenge, str):
-            raise RuntimeError("Authentication challenge missing 'challenge' string")
-
-        signature = self.key_manager.sign_challenge(challenge)
-        response = {
-            "type": "auth_response",
-            "device_id": self.config.device_id,
-            "signature": signature,
-        }
-        await self.websocket.send(json.dumps(response))
-        self.logger.debug("Sent auth_response message")
-
-        result_raw = await self.websocket.recv()
-        result = json.loads(result_raw)
-
-        if result.get("type") != "auth_success":
-            raise RuntimeError(f"Authentication failed: {result}")
-
-        token = result.get("token")
-        if not token:
-            raise RuntimeError("Authentication succeeded but no JWT token received")
-        self.token = token
-
-        server_public_key = result.get("server_public_key")
-        if server_public_key:
-            self.key_manager.set_server_public_key(server_public_key, persist=True)
-            self.logger.info("Received server public key from authentication")
-        else:
-            self.logger.warning("Authentication success without server public key")
-        self.logger.info("Authentication successful for device %s", self.config.device_id)
-
-    async def _consume_queue(self) -> None:
-        while self._connection_active and not self._stop_event.is_set():
-            self._pending_queue_task = asyncio.create_task(self.image_queue.get())
+        for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                message = await self._pending_queue_task
-            except asyncio.CancelledError:
-                break
-            finally:
-                self._pending_queue_task = None
+                signal.signal(sig, _stop_handler)
+            except ValueError:
+                # Raised when running in an environment that forbids signal handlers.
+                pass
 
-            if not message:
+    def request_stop(self) -> None:
+        self._stopped = True
+
+    def close(self) -> None:
+        self.queue.close()
+        self.tts.close()
+        self.session.close()
+
+    # --------------------------- authentication -----------------------------
+    def ensure_authenticated(self) -> None:
+        now = time.time()
+        if self.token and now < (self.token_expiry - 10):
+            return
+
+        self.logger.info("Authenticating with OCR server at %s", self.config.server_base_url)
+        response = self.session.post(
+            self.config.get_challenge_url,
+            json={"public_key": self.keys.public_key_pem()},
+            timeout=self.config.request_timeout,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Challenge request failed: {response.status_code} {response.text}")
+        challenge_payload = response.json()
+        challenge = challenge_payload.get("challenge")
+        challenge_token = challenge_payload.get("challenge_token")
+        if not challenge or not challenge_token:
+            raise RuntimeError("Invalid challenge payload from server")
+
+        signature = self.keys.sign_challenge(challenge)
+        auth_response = self.session.post(
+            self.config.auth_url,
+            json={"challenge_token": challenge_token, "signed_challenge": signature},
+            timeout=self.config.request_timeout,
+        )
+        if auth_response.status_code != 200:
+            raise RuntimeError(f"Authentication failed: {auth_response.status_code} {auth_response.text}")
+
+        data = auth_response.json()
+        self.token = data.get("token")
+        expires_in = data.get("expires_in", self.config.request_timeout)
+        if not self.token:
+            raise RuntimeError("Authentication response missing token")
+
+        self.token_expiry = time.time() + float(expires_in)
+        server_public_key = data.get("server_public_key")
+        if server_public_key:
+            self.keys.cache_server_public_key(server_public_key)
+
+        self.logger.info("Authentication successful. Token expires in %.0f seconds.", float(expires_in))
+
+    # --------------------------- OCR processing -----------------------------
+    def run(self) -> None:
+        self.logger.info("OCR client started. Waiting for images...")
+        while not self._stopped:
+            try:
+                image_ref = self.queue.get()
+            except KeyboardInterrupt:
+                break
+            except Exception as exc:
+                self.logger.error("Queue read failed: %s", exc)
+                time.sleep(self.config.retry_delay)
                 continue
 
-            await self._handle_image_message(message)
+            if not image_ref:
+                continue
 
-    async def _handle_image_message(self, message: str) -> None:
-        path = Path(message).expanduser()
-        if not path.is_absolute():
-            path = (self.config.image_base_dir / path).resolve()
-        else:
-            path = path.resolve()
+            try:
+                self.ensure_authenticated()
+            except Exception as exc:
+                self.logger.error("Authentication error: %s", exc)
+                time.sleep(self.config.retry_delay)
+                continue
 
-        if not path.exists():
-            self.logger.error("Image %s not found; skipping", path)
+            self._process_image(image_ref)
+
+        self.logger.info("OCR client stopped.")
+
+    def _process_image(self, image_ref: str) -> None:
+        image_path = Path(image_ref).expanduser()
+        if not image_path.is_absolute():
+            image_path = (self.config.image_base_dir / image_path).resolve()
+
+        if not image_path.exists():
+            self.logger.error("Image %s not found; skipping.", image_path)
             return
 
+        self.logger.info("Submitting %s for OCR", image_path)
         try:
-            data = path.read_bytes()
-        except OSError as exc:
-            self.logger.error("Failed to read %s: %s", path, exc)
-            return
-
-        if not self.token:
-            self.logger.error("Authentication token unavailable; cannot send image")
-            return
-
-        try:
-            payload = self.key_manager.encrypt_for_server(data)
-        except RuntimeError as exc:
-            self.logger.error("Cannot encrypt payload: %s", exc)
-            return
-
-        request_id = uuid.uuid4().hex
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future = loop.create_future()
-        self.pending_requests[request_id] = future
-
-        message_payload = {
-            "type": "ocr_request",
-            "device_id": self.config.device_id,
-            "token": self.token,
-            "request_id": request_id,
-            "filename": path.name,
-            "payload": payload,
-        }
-
-        await self._send_json(message_payload)
-
-        try:
-            response = await asyncio.wait_for(
-                future, timeout=self.config.request_timeout
-            )
-        except asyncio.TimeoutError:
-            self.logger.error("OCR request %s timed out", request_id)
-            future.cancel()
-            return
-        finally:
-            self.pending_requests.pop(request_id, None)
-
-        if response.get("status", "ok") != "ok":
-            self.logger.error(
-                "OCR server reported error for %s: %s",
-                path,
-                response.get("error", response),
-            )
-            return
-
-        recognised_text = response.get("text", "")
-        if recognised_text:
-            self.logger.info("Received OCR response for %s", path.name)
-        else:
-            self.logger.warning("OCR response for %s contained no text", path.name)
-        await self.tts_pipeline.speak(recognised_text)
-
-    async def _send_json(self, message: Dict[str, object]) -> None:
-        if not self.websocket:
-            raise RuntimeError("WebSocket connection is not established")
-        await self.websocket.send(json.dumps(message))
-
-    async def _recv_loop(self) -> None:
-        assert self.websocket is not None
-        try:
-            async for raw in self.websocket:
-                try:
-                    payload = json.loads(raw)
-                except json.JSONDecodeError:
-                    self.logger.error("Received malformed JSON: %s", raw)
-                    continue
-
-                msg_type = payload.get("type")
-                if msg_type == "ocr_result":
-                    request_id = payload.get("request_id")
-                    future = self.pending_requests.get(request_id or "")
-                    if future and not future.done():
-                        future.set_result(payload)
-                    else:
-                        self.logger.warning(
-                            "Received OCR result for unknown request id %s", request_id
-                        )
-                elif msg_type == "token_refresh":
-                    token = payload.get("token")
-                    if token:
-                        self.token = token
-                        self.logger.info("JWT token refreshed")
-                elif msg_type == "server_public_key":
-                    key_pem = payload.get("value")
-                    if key_pem:
-                        self.key_manager.set_server_public_key(key_pem, persist=True)
-                        self.logger.info("Updated server public key from push message")
-                elif msg_type == "error":
-                    request_id = payload.get("request_id")
-                    future = self.pending_requests.get(request_id or "")
-                    if future and not future.done():
-                        future.set_result(payload)
-                    else:
-                        self.logger.error("Server error: %s", payload)
-                elif msg_type == "ping":
-                    await self._send_json({"type": "pong"})
-                else:
-                    self.logger.debug("Unhandled server message: %s", payload)
-        except ConnectionClosed as exc:
-            self.logger.warning("Connection closed: %s", exc)
+            with image_path.open("rb") as fh:
+                files = {"file": (image_path.name, fh, "application/octet-stream")}
+                headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+                data = {"jwt_token": self.token or ""}
+                response = self.session.post(
+                    self.config.ocr_url,
+                    data=data,
+                    files=files,
+                    timeout=self.config.request_timeout,
+                )
         except Exception as exc:
-            self.logger.error("Receiver loop error: %s", exc)
-        finally:
-            self._connection_active = False
-            if self._pending_queue_task:
-                self._pending_queue_task.cancel()
-            for future in self.pending_requests.values():
-                if not future.done():
-                    future.cancel()
-            self.pending_requests.clear()
+            self.logger.error("Failed to upload %s: %s", image_path, exc)
+            return
 
-    async def _cleanup_connection(self) -> None:
-        if self.recv_task:
-            self.recv_task.cancel()
+        if response.status_code == 401:
+            self.logger.warning("Access token rejected. Re-authenticating...")
+            self.token = None
             try:
-                await self.recv_task
-            except asyncio.CancelledError:
-                pass
-            self.recv_task = None
+                self.ensure_authenticated()
+            except Exception as auth_exc:
+                self.logger.error("Re-authentication failed: %s", auth_exc)
+                return
+            self._process_image(str(image_path))
+            return
 
-        if self.websocket:
-            try:
-                await self.websocket.close()
-            except Exception:
-                pass
-            self.websocket = None
-        self._connection_active = False
+        if response.status_code != 200:
+            self.logger.error("OCR request failed (%s): %s", response.status_code, response.text)
+            return
+
+        try:
+            payload = response.json()
+        except ValueError:
+            self.logger.error("OCR server returned non-JSON response")
+            return
+
+        if payload.get("status") != "ok":
+            self.logger.error("OCR server error: %s", payload)
+            return
+
+        text = payload.get("text", "").strip()
+        if text:
+            self.logger.info("OCR result (%s): %s", image_path.name, text)
+            self.tts.speak(text)
+        else:
+            self.logger.warning("OCR result for %s contained no text.", image_path.name)
 
 
-async def _enqueue_image(config: Config, logger: logging.Logger, image: str) -> None:
-    queue = ImageQueue(config, logger)
-    await queue.put(image)
-    queue.close()
+# -----------------------------------------------------------------------------
+# CLI helpers
+# -----------------------------------------------------------------------------
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Embedded OCR client")
-    parser.add_argument(
-        "--server-url",
-        help="Override the OCR server URL (ws://host:port)",
-    )
-    parser.add_argument(
-        "--device-id",
-        help="Override the device identifier used during authentication",
-    )
-    parser.add_argument(
-        "--enqueue",
-        metavar="IMAGE_PATH",
-        help="Enqueue an image for processing and exit",
-    )
-    parser.add_argument(
-        "--log-level",
-        help="Set log level (DEBUG, INFO, WARNING, ERROR)",
-    )
+    parser.add_argument("--server-url", help="HTTP base URL of the OCR server (default env OCR_SERVER_URL)")
+    parser.add_argument("--device-id", help="Override device identifier")
+    parser.add_argument("--enqueue", metavar="IMAGE_PATH", help="Enqueue an image path and exit")
+    parser.add_argument("--log-level", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    parser.add_argument("--no-tts", action="store_true", help="Disable text-to-speech output")
     return parser.parse_args()
 
 
-async def main_async(args: argparse.Namespace) -> None:
-    config = Config()
-    if args.server_url:
-        config.server_url = args.server_url
-    if args.device_id:
-        config.device_id = args.device_id
-    if args.log_level:
-        config.log_level = args.log_level.upper()
-
-    logger = configure_logging(config.log_level)
-
-    if args.enqueue:
-        await _enqueue_image(config, logger, args.enqueue)
-        logger.info("Enqueued %s for OCR processing", args.enqueue)
-        return
-
-    client = OCRClient(config, logger)
-    loop = asyncio.get_running_loop()
-    try:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(signum, client.stop)
-            except NotImplementedError:
-                # Windows does not allow custom signal handlers in asyncio.
-                break
-        await client.run()
-    finally:
-        client.stop()
+def enqueue_image(config: Config, logger: logging.Logger, image_path: str) -> None:
+    queue = ImageQueue(config, logger)
+    queue.put(image_path)
+    queue.close()
+    logger.info("Queued %s for OCR", image_path)
 
 
 def main() -> None:
     args = parse_args()
+    config = Config()
+    if args.server_url:
+        config.server_base_url = args.server_url
+    if args.device_id:
+        config.device_id = args.device_id
+    if args.log_level:
+        config.log_level = args.log_level.upper()
+    if args.no_tts:
+        config.tts_enabled = False
+
+    logger = configure_logging(config.log_level)
+
+    if args.enqueue:
+        enqueue_image(config, logger, args.enqueue)
+        return
+
+    client = OCRClient(config, logger)
+    client.install_signal_handlers()
     try:
-        asyncio.run(main_async(args))
-    except KeyboardInterrupt:
-        pass
+        client.run()
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":
