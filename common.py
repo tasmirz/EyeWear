@@ -14,8 +14,11 @@ class IPC:
     def __init__(self, filename):
         self.filename = filename
         self.pidfile = f".pid/{self.filename}.pid"
-        self.create_pidfile(self.filename)
-
+        if not os.path.exists(self.pidfile):
+            self.create_pidfile(self.filename)
+        else:
+            logging.info(f"PID file {self.pidfile} already exists.")
+            exit(1)
 
     def create_pidfile(self, filename):
         # Ensure the .pid directory exists

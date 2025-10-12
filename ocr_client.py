@@ -12,7 +12,16 @@
 # 4. Ensure piped sequentially
 
 """
+<<<<<<< HEAD
 Secure OCR client pipeline.
+=======
+Connection 
+1. There is priv, publ keys in ./keys
+2. request challenge from server, sign with priv key, send back
+3. checks if the public key is in mogodb
+4. server verifies with publ key
+5. Receive JWT token, server publ key
+>>>>>>> a076f64d4aff5ad26215e906a364fd04544668ce
 
 This client is responsible for:
 1. Establishing a WebSocket connection with the OCR server.

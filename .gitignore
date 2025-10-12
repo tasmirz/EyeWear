@@ -1,5 +1,4 @@
 .env
-.pid
 .venv
 
 **/.DS_Store
