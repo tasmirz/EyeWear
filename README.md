@@ -11,7 +11,8 @@ as Raspberry Pi Zero 2.
 
 - **`bbocr_server/server.py`**  
   Flask API handling RSA challenge–response authentication, receiving image uploads,
-  running OCR, and requesting a Gemini summary.
+  rendering Bangla OCR to HTML (via `pipeline_utils.py` with the full pipeline when
+  available, otherwise a pytesseract fallback), and requesting a Gemini summary.
 
 - **`ocr_client.py`**  
   Command-line client that watches an image queue, authenticates with the server,
@@ -28,12 +29,25 @@ as Raspberry Pi Zero 2.
 
 ## Prerequisites
 
+### Bangla OCR Assets
+
+The high-accuracy pipeline expects the Bangla OCR models that ship with the
+larger project:
+
+- `bnocr.onnx`
+- `best.pt`
+
+Place them on the device and update the paths in `bbocr_server/pipeline.py`
+if they differ from the defaults.  
+If these files are missing, the server automatically falls back to
+`pytesseract`; accuracy on Bangla will be noticeably lower.
+
 1. **System Packages (Raspberry Pi OS / Debian)**
 
    ```bash
    sudo apt update
    sudo apt install python3 python3-pip espeak-ng alsa-utils bluetooth \
-       libblas-dev liblapack-dev libatlas-base-dev tesseract-ocr
+       libblas-dev liblapack-dev libatlas-base-dev tesseract-ocr tesseract-ocr-ben
    ```
 
    _Install `espeak-ng` to access the Bangla (`bn`) voice used by the TTS pipeline; `alsa-utils` and `bluetooth` are only needed if you plan to play audio._
@@ -59,6 +73,16 @@ as Raspberry Pi Zero 2.
 ---
 
 ## Usage Guide
+
+| Step                 | Command                                                                                                                                               | Notes                                                                                                |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 1. Start server      | `cd embedded_base/bbocr_server`<br>`export $(grep -v '^#' .env.local \| xargs)`<br>`SERVER_PORT=8080 python3 server.py > /tmp/bbocr_flask.log 2>&1 &` | Launches the Flask OCR service (loads Bangla models if available). Use another port if 8080 is busy. |
+| 2. Health check      | `curl -s http://127.0.0.1:8080/health`                                                                                                                | Confirms the server is listening.                                                                    |
+| 3a. Queue image      | `python3 embedded_base/ocr_client.py --enqueue embedded_base/test_images/sample.jpg`                                                                  | Adds an image to the filesystem/POSIX queue. Repeat per image.                                       |
+| 3b. Quick single-run | `python3 embedded_base/ocr_client.py --process-image embedded_base/test_images/sample.jpg --no-tts`                                                   | Skips the queue; authenticates, uploads once, prints OCR + Gemini response.                          |
+| 4. Continuous client | `python3 embedded_base/ocr_client.py --no-tts --log-level INFO`                                                                                       | Consumes the queue, uploads images, prints raw OCR text.                                             |
+| 5. Review Gemini     | `tail -f /tmp/bbocr_flask.log`                                                                                                                        | Gemini Markdown summaries logged after each OCR result.                                              |
+| 6. Optional TTS      | `python3 embedded_base/ocr_client.py --log-level INFO`                                                                                                | Enables Bangla TTS; configure `TTS_BLUETOOTH_MAC`/`TTS_AUDIO_DEVICE` as needed.                      |
 
 ### 1. Start the OCR Server
 
@@ -96,6 +120,9 @@ Repeat for every image you want processed.
 
 > **Quick check:** to process a single image immediately (without using the queue), run  
 > `python3 embedded_base/ocr_client.py --process-image embedded_base/test_images/sample.jpg --no-tts`
+
+If you rely on the fallback OCR, set `BB_OCR_LANG=ben+eng` (or your preferred
+language combo) before starting the server to steer pytesseract.
 
 ### 3. Run the OCR Client (without TTS)
 
@@ -147,6 +174,7 @@ export TTS_AUDIO_DEVICE="bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp"
 | `403 Forbidden` on client       | Confirm the client uses HTTP REST (`ocr_client.py`) and the server is running.                                                                                  |
 | `Signature verification failed` | Ensure both server and client use the updated `cryptography` version and that the device public key is registered (see `bbocr_server/authorized_devices.json`). |
 | Gemini errors in log            | Check that `GEMINI_AI_API_KEY`/`GEMINI_AI_MODEL` are set and valid; inspect `/tmp/bbocr_flask.log` for HTTP codes from the Gemini API.                          |
+| Bengali OCR accuracy is poor    | Verify `bnocr.onnx` and `best.pt` are present; without them the server uses the pytesseract fallback (requires `tesseract-ocr-ben`).                            |
 | Bluetooth/TTS silent            | Confirm `espeak-ng` is installed, the headset is paired, and ALSA device name is correct.                                                                       |
 
 ---
