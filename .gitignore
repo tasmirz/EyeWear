@@ -1,4 +1,7 @@
 .env
 .venv
 
+./bborc_server/.env
+./bborc_server/.env*.local
+
 **/.DS_Store
