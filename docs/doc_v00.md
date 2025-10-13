@@ -432,7 +432,3 @@ Empty placeholder ensuring `bbocr_server/modules/` behaves as a package. The fil
 - **Monitoring**: Use logs from `ocr_client`, server, and TTS modules to detect fallback scenarios (e.g., Gemini disabled, pipeline fallback to Tesseract).
 - **Extensibility**: Implement new recognisers/detectors with the ABCs in `modules.py`, then plug them into `pipeline.py` or `pipeline_utils.py`.
 - **Documentation**: This unified guide replaces individual markdown files; update it when components evolve to keep architectural knowledge centralised.
-
----
-
-_End of `_doc_v00.md`_
