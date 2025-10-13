@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 """
-Lightweight text-to-speech pipeline optimised for Raspberry Pi devices.
+Lightweight text-to-speech pipeline powered by Meta's MMS-TTS (VITS) models.
 
 Features:
-- Optional Bluetooth headset auto-connect using bluetoothctl.
-- Uses the espeak-ng engine by default (available on Raspberry Pi OS).
-- Supports directing audio through a specific ALSA device (e.g. Bluetooth sink).
-- Reads newline-delimited text from stdin, speaking each entry sequentially.
+- Streams Bangla text to `facebook/mms-tts-ben` (configurable via env/CLI).
+- Generates MP3 files for each line of text received on stdin.
+- Relies on PyTorch + Hugging Face Transformers; no external TTS engine required.
 """
 
 import argparse
@@ -19,7 +18,20 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Optional
+import tempfile
+import re
+import wave
+import numpy as np
+
+try:
+    import torch
+    from transformers import AutoTokenizer, VitsModel
+except ImportError:  # pragma: no cover - runtime dependency check
+    torch = None  # type: ignore
+    AutoTokenizer = None  # type: ignore
+    VitsModel = None  # type: ignore
 
 
 def configure_logging(level: str) -> logging.Logger:
@@ -35,17 +47,14 @@ def configure_logging(level: str) -> logging.Logger:
 
 @dataclass
 class TTSConfig:
-    # espeak-ng provides a "bn" voice that works better for Bangla output.
-    voice: str = os.getenv("TTS_VOICE", "bn")
-    rate: int = int(os.getenv("TTS_RATE", "165"))
-    volume: int = int(os.getenv("TTS_VOLUME", "150"))  # 0-200 for espeak
-    espeak_cmd: str = os.getenv("TTS_ESPEAK_CMD", "espeak-ng")
-    aplay_cmd: str = os.getenv("TTS_APLAY_CMD", "aplay")
-    audio_device: Optional[str] = os.getenv("TTS_AUDIO_DEVICE") or None
-    bluetooth_mac: Optional[str] = os.getenv("TTS_BLUETOOTH_MAC") or None
-    bluetooth_retries: int = int(os.getenv("TTS_BLUETOOTH_RETRIES", "3"))
-    bluetooth_retry_delay: float = float(os.getenv("TTS_BLUETOOTH_RETRY_DELAY", "2.0"))
+    model_id: str = os.getenv("MMS_TTS_MODEL_ID", "facebook/mms-tts-ben")
+    device: str = os.getenv("MMS_TTS_DEVICE", "cpu")
+    dtype: Optional[str] = os.getenv("MMS_TTS_DTYPE") or None
+    speaker: Optional[str] = os.getenv("MMS_TTS_SPEAKER") or None
+    seed: Optional[int] = int(os.getenv("MMS_TTS_SEED", "").strip()) if os.getenv("MMS_TTS_SEED") else None
     log_level: str = os.getenv("TTS_LOG_LEVEL", "INFO")
+    output_dir: Path = Path(os.getenv("TTS_OUTPUT_DIR") or Path.cwd()).expanduser().resolve()
+    ffmpeg_cmd: str = os.getenv("FFMPEG_CMD", shutil.which("ffmpeg") or "ffmpeg")
 
 
 class TTSPipeline:
@@ -54,29 +63,181 @@ class TTSPipeline:
         self.logger = logger
         self._stop_requested = False
         self._ensure_dependencies()
+        self.config.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _ensure_dependencies(self) -> None:
-        if shutil.which(self.config.espeak_cmd) is None:
-            fallback = "espeak"
-            if self.config.espeak_cmd != fallback and shutil.which(fallback):
-                self.logger.warning(
-                    "'%s' not found; falling back to '%s'",
-                    self.config.espeak_cmd,
-                    fallback,
-                )
-                self.config.espeak_cmd = fallback
-            else:
-                raise RuntimeError(
-                    f"'{self.config.espeak_cmd}' not found. Install espeak-ng (sudo apt install espeak-ng)."
-                )
-        if self.config.audio_device and shutil.which(self.config.aplay_cmd) is None:
+        if torch is None or AutoTokenizer is None or VitsModel is None:
             raise RuntimeError(
-                f"Audio device specified but '{self.config.aplay_cmd}' is missing. Install alsa-utils."
+                "Missing TTS dependencies. Install 'torch', 'transformers>=4.33', and 'accelerate' "
+                "to use facebook/mms-tts models."
             )
-        if self.config.bluetooth_mac and shutil.which("bluetoothctl") is None:
-            self.logger.warning(
-                "Bluetooth MAC provided but 'bluetoothctl' is not installed; skipping auto-connect."
+        if shutil.which(self.config.ffmpeg_cmd) is None and not Path(self.config.ffmpeg_cmd).is_file():
+            raise RuntimeError(
+                f"'{self.config.ffmpeg_cmd}' not found. Install ffmpeg or set FFMPEG_CMD to a valid executable."
             )
+        self._load_model()
+
+    def _resolve_dtype(self) -> Optional[torch.dtype]:
+        if not self.config.dtype:
+            return None
+        mapping = {
+            "float32": torch.float32,
+            "fp32": torch.float32,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+        }
+        key = self.config.dtype.lower()
+        if key not in mapping:
+            self.logger.warning("Unsupported dtype '%s'; falling back to float32.", self.config.dtype)
+            return None
+        return mapping[key]
+
+    def _load_model(self) -> None:
+        assert torch is not None and AutoTokenizer is not None and VitsModel is not None
+        dtype = self._resolve_dtype()
+        self.device = torch.device(self.config.device)
+
+        self.logger.info("Loading MMS TTS model '%s' on %s", self.config.model_id, self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_id)
+        self.model = VitsModel.from_pretrained(self.config.model_id)
+        if dtype is not None:
+            self.model = self.model.to(dtype=dtype)
+        self.model = self.model.to(self.device)
+        self.model.eval()
+
+        self.sampling_rate = getattr(self.model.config, "sampling_rate", 16000)
+        self.speaker_id: Optional[int] = None
+
+        speaker_map = getattr(self.model.config, "speaker_ids", None)
+        if self.config.speaker:
+            if isinstance(speaker_map, dict) and self.config.speaker in speaker_map:
+                self.speaker_id = speaker_map[self.config.speaker]
+            elif self.config.speaker.isdigit():
+                self.speaker_id = int(self.config.speaker)
+            else:
+                self.logger.warning(
+                    "Speaker '%s' not recognised; using default speaker.", self.config.speaker
+                )
+        elif isinstance(speaker_map, dict) and len(speaker_map) == 1:
+            self.speaker_id = next(iter(speaker_map.values()))
+
+        if self.config.seed is not None:
+            torch.manual_seed(self.config.seed)
+
+    # ------------------------------------------------------------------ signals
+    def install_signal_handlers(self) -> None:
+        def _handler(signum, _frame):
+            self.logger.info("Received signal %s; shutting down TTS pipeline.", signum)
+            self._stop_requested = True
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(sig, _handler)
+            except ValueError:
+                pass
+
+    # ---------------------------------------------------------------- synthesis
+    def speak(self, text: str, output_name: Optional[str] = None) -> None:
+        text = text.strip()
+        if not text:
+            return
+
+        safe_base = re.sub(r"[^A-Za-z0-9_-]", "_", (output_name or "").strip())
+        if not safe_base:
+            safe_base = f"tts_{int(time.time())}"
+
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        wav_path = Path(tmp_path)
+
+        try:
+            self._synth_to_wav(text, wav_path)
+            mp3_path = self._wav_to_mp3(wav_path, safe_base)
+            self.logger.info("Generated MP3 TTS output: %s", mp3_path)
+        finally:
+            wav_path.unlink(missing_ok=True)
+
+    def _synth_to_wav(self, text: str, wav_path: Path) -> None:
+        assert torch is not None
+        inputs = self.tokenizer(text, return_tensors="pt")
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        if self.speaker_id is not None:
+            inputs["speaker_id"] = torch.tensor([self.speaker_id], device=self.device, dtype=torch.long)
+
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+
+        waveform = outputs.waveform.squeeze().cpu().numpy()
+        if waveform.ndim == 0:
+            waveform = np.expand_dims(waveform, axis=0)
+        waveform = np.clip(waveform, -1.0, 1.0)
+        pcm16 = (waveform * 32767.0).astype(np.int16)
+
+        with wave.open(str(wav_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)  # int16
+            wav_file.setframerate(int(self.sampling_rate))
+            wav_file.writeframes(pcm16.tobytes())
+
+    def _wav_to_mp3(self, wav_path: Path, base_name: str) -> Path:
+        safe_base = re.sub(r"[^A-Za-z0-9_-]", "_", base_name.strip())
+        if not safe_base:
+            safe_base = f"tts_{int(time.time())}"
+
+        mp3_path = self.config.output_dir / f"{safe_base}.mp3"
+        convert_cmd = [
+            self.config.ffmpeg_cmd,
+            "-y",
+            "-f",
+            "wav",
+            "-i",
+            str(wav_path),
+            "-ar",
+            str(self.sampling_rate),
+            "-ac",
+            "1",
+            str(mp3_path),
+        ]
+        try:
+            subprocess.run(convert_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"ffmpeg conversion failed (code={exc.returncode})") from exc
+        return mp3_path
+
+    # ------------------------------------------------------------------- loop
+    def run_stream(self, stream: Iterable[str]) -> None:
+        self.logger.info("TTS pipeline ready. Awaiting text on stdin.")
+        for raw in stream:
+            if self._stop_requested:
+                break
+            line = raw.strip()
+            if not line:
+                continue
+            output_name: Optional[str] = None
+            text = line
+            if "|" in line:
+                prefix, body = line.split("|", 1)
+                body = body.strip()
+                if not body:
+                    continue
+                output_name = prefix.strip() or None
+                text = body
+            self.logger.debug(
+                "Processing TTS request (mp3=%s): %s",
+                f"{output_name}.mp3" if output_name else "stdout",
+                text,
+            )
+            try:
+                self.speak(text, output_name)
+            except Exception as exc:
+                self.logger.error("TTS synthesis failed: %s", exc)
+
+        self.logger.info("TTS pipeline exiting.")
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
 
     # ------------------------------------------------------------------ signals
     def install_signal_handlers(self) -> None:
@@ -91,121 +252,26 @@ class TTSPipeline:
                 # Occurs when running in a thread or unsupported environment.
                 pass
 
-    # -------------------------------------------------------------- bluetooth
-    def connect_bluetooth(self) -> None:
-        mac = self.config.bluetooth_mac
-        if not mac:
-            return
-
-        if shutil.which("bluetoothctl") is None:
-            return
-
-        self.logger.info("Ensuring Bluetooth headset %s is connected", mac)
-        for attempt in range(1, self.config.bluetooth_retries + 1):
-            if self._bluetooth_connected(mac):
-                self.logger.info("Bluetooth device %s already connected", mac)
-                return
-
-            self.logger.info("Attempting Bluetooth connection (%d/%d)", attempt, self.config.bluetooth_retries)
-            result = subprocess.run(
-                ["bluetoothctl", "connect", mac],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0 and self._bluetooth_connected(mac):
-                self.logger.info("Bluetooth device %s connected successfully", mac)
-                return
-
-            self.logger.warning(
-                "Bluetooth connection attempt %d failed: %s",
-                attempt,
-                result.stderr.strip(),
-            )
-            time.sleep(self.config.bluetooth_retry_delay)
-
-        self.logger.error("Unable to connect to Bluetooth device %s after %d attempts", mac, self.config.bluetooth_retries)
-
-    @staticmethod
-    def _bluetooth_connected(mac: str) -> bool:
-        result = subprocess.run(
-            ["bluetoothctl", "info", mac],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return False
-        return "Connected: yes" in result.stdout
-
-    # ---------------------------------------------------------------- playback
-    def speak(self, text: str) -> None:
+    # ---------------------------------------------------------------- synthesis
+    def speak(self, text: str, output_name: Optional[str] = None) -> None:
         text = text.strip()
         if not text:
             return
 
-        if self.config.audio_device:
-            self._speak_via_aplay(text)
-        else:
-            self._speak_direct(text)
+        safe_base = re.sub(r"[^A-Za-z0-9_-]", "_", (output_name or "").strip())
+        if not safe_base:
+            safe_base = f"tts_{int(time.time())}"
 
-    def _espeak_base_args(self) -> list[str]:
-        return [
-            self.config.espeak_cmd,
-            "-v",
-            self.config.voice,
-            "-s",
-            str(self.config.rate),
-            f"-a{self.config.volume}",
-        ]
-
-    def _speak_direct(self, text: str) -> None:
-        cmd = self._espeak_base_args() + ["--stdin"]
-        try:
-            subprocess.run(
-                cmd,
-                input=text,
-                text=True,
-                check=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            self.logger.error("espeak command failed (%s): %s", exc.returncode, exc)
-        except FileNotFoundError:
-            self.logger.error("espeak executable not found at %s", self.config.espeak_cmd)
-
-    def _speak_via_aplay(self, text: str) -> None:
-        espeak_cmd = self._espeak_base_args() + ["--stdout"]
-        aplay_cmd = [self.config.aplay_cmd, "-q"]
-        if self.config.audio_device:
-            aplay_cmd.extend(["-D", self.config.audio_device])
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        wav_path = Path(tmp_path)
 
         try:
-            with subprocess.Popen(
-                espeak_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            ) as espeak_proc:
-                with subprocess.Popen(
-                    aplay_cmd,
-                    stdin=espeak_proc.stdout,
-                    stderr=subprocess.PIPE,
-                ) as aplay_proc:
-                    if espeak_proc.stdout:
-                        espeak_proc.stdout.close()
-                    stderr_espeak = ""
-                    try:
-                        _, stderr_espeak = espeak_proc.communicate(text)
-                    finally:
-                        if espeak_proc.stdin:
-                            espeak_proc.stdin.close()
-                    stderr_aplay = aplay_proc.communicate()[1] or ""
-
-            if espeak_proc.returncode != 0:
-                self.logger.error("espeak failed (%s): %s", espeak_proc.returncode, stderr_espeak.strip())
-            if aplay_proc.returncode != 0:
-                self.logger.error("aplay failed (%s): %s", aplay_proc.returncode, stderr_aplay.strip())
-        except FileNotFoundError as exc:
-            self.logger.error("Required executable missing: %s", exc)
+            self._synth_to_wav(text, wav_path)
+            mp3_path = self._wav_to_mp3(wav_path, safe_base)
+            self.logger.info("Generated MP3 TTS output: %s", mp3_path)
+        finally:
+            wav_path.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------- loop
     def run_stream(self, stream: Iterable[str]) -> None:
@@ -213,11 +279,24 @@ class TTSPipeline:
         for raw in stream:
             if self._stop_requested:
                 break
-            text = raw.strip()
-            if not text:
+            line = raw.strip()
+            if not line:
                 continue
-            self.logger.debug("Speaking text: %s", text)
-            self.speak(text)
+            output_name: Optional[str] = None
+            text = line
+            if "|" in line:
+                prefix, body = line.split("|", 1)
+                body = body.strip()
+                if not body:
+                    continue
+                output_name = prefix.strip() or None
+                text = body
+            self.logger.debug(
+                "Processing TTS request (mp3=%s): %s",
+                f"{output_name}.mp3" if output_name else "stdout",
+                text,
+            )
+            self.speak(text, output_name)
 
         self.logger.info("TTS pipeline exiting.")
 
@@ -226,41 +305,35 @@ class TTSPipeline:
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sequential TTS pipeline for Raspberry Pi.")
-    parser.add_argument("--voice", help="espeak voice variant (default: env TTS_VOICE or 'en')")
-    parser.add_argument("--rate", type=int, help="Speech rate words per minute (default: env TTS_RATE or 165)")
-    parser.add_argument("--volume", type=int, help="espeak volume 0-200 (default: env TTS_VOLUME or 150)")
-    parser.add_argument("--audio-device", help="ALSA device for playback (e.g., bluealsa:DEV=XX:XX:XX:XX:XX:XX,PROFILE=a2dp)")
-    parser.add_argument("--bluetooth-mac", help="Bluetooth headset MAC address to auto-connect")
-    parser.add_argument("--bluetooth-retries", type=int, help="Bluetooth connection retries (default 3)")
-    parser.add_argument("--bluetooth-retry-delay", type=float, help="Seconds between Bluetooth attempts (default 2.0)")
-    parser.add_argument("--espeak-cmd", help="Path to espeak/espeak-ng executable")
-    parser.add_argument("--aplay-cmd", help="Path to aplay executable for ALSA playback")
-    parser.add_argument("--speak", help="Speak the provided text once and exit")
+    parser = argparse.ArgumentParser(description="Sequential TTS pipeline powered by facebook/mms-tts.")
+    parser.add_argument("--model-id", help="Hugging Face model id (default: env MMS_TTS_MODEL_ID or facebook/mms-tts-ben)")
+    parser.add_argument("--device", help="Torch device for inference (default: env MMS_TTS_DEVICE or 'cpu')")
+    parser.add_argument("--dtype", help="Torch dtype (float32, float16, bfloat16) (env MMS_TTS_DTYPE)")
+    parser.add_argument("--speaker", help="Speaker id/name for multi-speaker models (env MMS_TTS_SPEAKER)")
+    parser.add_argument("--seed", type=int, help="Seed to make synthesis deterministic (env MMS_TTS_SEED)")
+    parser.add_argument("--output-dir", help="Directory to store generated MP3 files (env TTS_OUTPUT_DIR)")
+    parser.add_argument("--ffmpeg-cmd", help="Path to ffmpeg executable (env FFMPEG_CMD)")
+    parser.add_argument("--speak", help="Speak the provided text once and exit (generates a temp MP3)")
     parser.add_argument("--log-level", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     return parser.parse_args(argv)
 
 
 def build_config(args: argparse.Namespace) -> TTSConfig:
     cfg = TTSConfig()
-    if args.voice:
-        cfg.voice = args.voice
-    if args.rate is not None:
-        cfg.rate = args.rate
-    if args.volume is not None:
-        cfg.volume = args.volume
-    if args.audio_device:
-        cfg.audio_device = args.audio_device
-    if args.bluetooth_mac:
-        cfg.bluetooth_mac = args.bluetooth_mac
-    if args.bluetooth_retries is not None:
-        cfg.bluetooth_retries = args.bluetooth_retries
-    if args.bluetooth_retry_delay is not None:
-        cfg.bluetooth_retry_delay = args.bluetooth_retry_delay
-    if args.espeak_cmd:
-        cfg.espeak_cmd = args.espeak_cmd
-    if args.aplay_cmd:
-        cfg.aplay_cmd = args.aplay_cmd
+    if args.model_id:
+        cfg.model_id = args.model_id
+    if args.device:
+        cfg.device = args.device
+    if args.dtype:
+        cfg.dtype = args.dtype
+    if args.speaker:
+        cfg.speaker = args.speaker
+    if args.seed is not None:
+        cfg.seed = args.seed
+    if args.output_dir:
+        cfg.output_dir = Path(args.output_dir).expanduser()
+    if args.ffmpeg_cmd:
+        cfg.ffmpeg_cmd = args.ffmpeg_cmd
     if args.log_level:
         cfg.log_level = args.log_level
     return cfg
@@ -278,10 +351,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     pipeline.install_signal_handlers()
-    pipeline.connect_bluetooth()
 
     if args.speak:
-        pipeline.speak(args.speak)
+        pipeline.speak(args.speak, output_name="cli_sample")
         return 0
 
     try:

@@ -14,9 +14,10 @@ flowchart LR
     client --> server["OCR Server\n(bbocr_server/server.py)"]
     server --> pipeline["OCR Pipeline\n(pipeline_utils.py / pipeline.py)"]
     pipeline --> server
-    server --> gemini["Gemini Post-process\n(system_prompt.py)"]
-    server --> client
-    client --> tts["TTS Pipeline\n(tts_pipeline.py)"]
+    server -->|OCR HTML| gemini["Gemini Post-process\n(system_prompt.py)"]
+    gemini -->|Markdown| server
+    server -->|Text + refined_text| client
+    client -->|refined_text| tts["TTS Pipeline\n(tts_pipeline.py)"]
     tts --> user["Audio Output"]
 ```
 
@@ -127,7 +128,7 @@ Use this when capture scripts run in separate processes or machines but need to 
 
 ### 4.1 `ocr_client.py`
 
-Central controller on the embedded device. It dequeues image paths, authenticates against the server, uploads images, and voices results.
+Central controller on the embedded device. It dequeues image paths, authenticates against the server, uploads images, and voices Gemini-refined results.
 
 ```mermaid
 sequenceDiagram
@@ -143,8 +144,8 @@ sequenceDiagram
         C->>S: /auth (token + signature)
         S-->>C: bearer token (fingerprint)
         C->>S: /ocr (multipart upload)
-        S-->>C: {text, html, markdown}
-        C->>T: speak(text)
+        S-->>C: {text, html, markdown, refined_text}
+        C->>T: speak(refined_text)
     end
 ```
 
@@ -155,7 +156,7 @@ Core building blocks:
 | `Config`     | Aggregates env vars/CLI flags: queue backend choice, key paths, server URL, logging, TTS options. |
 | `KeyManager` | Generates or loads RSA keys, signs challenges, stores server public key.                          |
 | `ImageQueue` | Chooses between POSIX message queue or filesystem directory backend.                              |
-| `TTSSink`    | Launches `tts_pipeline.py`, writes recognised text to its stdin, restarts on failure.             |
+| `TTSSink`    | Launches `tts_pipeline.py`, streams Gemini-refined text to its stdin, restarts on failure.        |
 
 Operational notes:
 
@@ -165,7 +166,7 @@ Operational notes:
 
 ### 4.2 `tts_pipeline.py`
 
-Provides speech output for recognised text, with optional Bluetooth headset auto-connect.
+Provides speech output for Gemini-refined text, with optional Bluetooth headset auto-connect.
 
 ```mermaid
 flowchart TD
@@ -176,14 +177,16 @@ flowchart TD
     init --> sig["install_signal_handlers()"]
     sig --> speak{--speak text?}
     speak -- yes --> once["pipeline.speak(text)"]
-    speak -- no --> bt["connect_bluetooth()"]
-    bt --> stream["run_stream(stdin)"]
+    speak -- no --> stream["run_stream(stdin)"]
     stream --> speakLoop["for line -> speak()"]
+    speakLoop --> synth["MMS-TTS (Transformers)"]
+    synth --> convert["ffmpeg -> MP3"]
 ```
 
-- Supports direct `espeak-ng` playback or piping audio through ALSA (`aplay`) when a specific device is set.
+- Streams text through MMS-TTS (Transformers) to produce temporary WAV files that are converted to MP3 artefacts.
 - Gracefully handles SIGINT/SIGTERM, flushing remaining text before exit.
-- Provides environment variables (`TTS_VOICE`, `TTS_RATE`, `TTS_BLUETOOTH_MAC`, etc.) for quick tuning.
+- Provides environment variables (`MMS_TTS_MODEL_ID`, `MMS_TTS_DEVICE`, `MMS_TTS_DTYPE`, `MMS_TTS_SPEAKER`, `TTS_OUTPUT_DIR`, etc.) for quick tuning.
+- Expects `refined_text` from the server; if Gemini is disabled or empty it leaves the headset quiet and logs a warning.
 
 ---
 
@@ -239,7 +242,7 @@ flowchart TD
     respQueue --> submit
     submit --> cleanup["Delete temp file"]
     cleanup --> gemini["GeminiClient.generate_markdown()"]
-    gemini --> reply["Return JSON {text, html, markdown, key_fingerprint}"]
+    gemini --> reply["Return JSON {text, html, markdown, refined_text, key_fingerprint}"]
 ```
 
 Deployment guidelines:
@@ -247,6 +250,7 @@ Deployment guidelines:
 - Supply PEM files for each allowed device under `authorized_keys/` or JSON fallback.
 - Set a strong `JWT_SECRET` and configure optionally for MongoDB lookups.
 - Gemini integration is optional; when disabled the server still returns HTML/text.
+- Attempts to bind to `SERVER_PORT` and, if busy, automatically tries higher ports unless `SERVER_PORT_AUTO=0`.
 
 ### 5.2 `bbocr_server/pipeline_utils.py`
 

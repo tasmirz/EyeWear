@@ -7,7 +7,7 @@ Workflow
 2. POST /get_challenge with the public key, sign the challenge, obtain JWT.
 3. Watch the image queue (POSIX message queue if available, otherwise a simple
    directory) for filenames to process.
-4. Upload images to /ocr and forward recognised text to the TTS pipeline.
+4. Upload images to /ocr, receive Gemini refinements, and forward the refined text to the TTS pipeline.
 """
 
 from __future__ import annotations
@@ -284,8 +284,13 @@ class TTSSink:
         self.logger = logger
         self.enabled = enabled
         self._process: Optional[subprocess.Popen[str]] = None
+        self.output_dir = Path(os.getenv("TTS_OUTPUT_DIR") or Path.cwd()).expanduser().resolve()
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.logger.warning("Unable to create TTS output directory %s: %s", self.output_dir, exc)
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, output_name: Optional[str] = None) -> None:
         clean = text.strip()
         if not clean:
             return
@@ -298,15 +303,41 @@ class TTSSink:
             self.logger.warning("TTS script %s not found. Text: %s", self.script_path, clean)
             return
 
+        mp3_path: Optional[Path] = None
+        wait_dir = self.output_dir
+        env = None
+        if output_name:
+            mp3_path = wait_dir / f"{output_name}.mp3"
+            try:
+                mp3_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
         if self._process is None or self._process.poll() is not None:
             try:
+                env = os.environ.copy()
+                if "TTS_OUTPUT_DIR" in env:
+                    try:
+                        wait_dir = Path(env["TTS_OUTPUT_DIR"]).expanduser().resolve()
+                    except Exception:
+                        wait_dir = self.output_dir
+                else:
+                    env["TTS_OUTPUT_DIR"] = str(wait_dir)
+                try:
+                    wait_dir.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    self.logger.warning("Unable to ensure TTS output directory %s: %s", wait_dir, exc)
+                if mp3_path is not None:
+                    mp3_path = wait_dir / mp3_path.name
                 self._process = subprocess.Popen(
                     [sys.executable, str(self.script_path)],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     text=True,
+                    env=env,
                 )
+                self.output_dir = wait_dir
             except Exception as exc:
                 self.logger.error("Failed to launch TTS pipeline: %s", exc)
                 self._process = None
@@ -315,12 +346,24 @@ class TTSSink:
 
         assert self._process.stdin is not None
         try:
-            self._process.stdin.write(clean + "\n")
+            line = clean if output_name is None else f"{output_name}|{clean}"
+            self._process.stdin.write(line + "\n")
             self._process.stdin.flush()
         except (BrokenPipeError, ValueError) as exc:
             self.logger.error("Writing to TTS pipeline failed: %s", exc)
             self._process = None
             self.logger.info("TTS fallback output: %s", clean)
+            return
+
+        if mp3_path:
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                if mp3_path.exists():
+                    self.logger.info("TTS MP3 generated: %s", mp3_path)
+                    break
+                time.sleep(0.1)
+            else:
+                self.logger.warning("Expected TTS MP3 %s but it was not created.", mp3_path)
 
     def close(self) -> None:
         if self._process and self._process.poll() is None:
@@ -499,12 +542,22 @@ class OCRClient:
             self.logger.error("OCR server error: %s", payload)
             return
 
-        text = payload.get("text", "").strip()
+        text = (payload.get("text") or "").strip()
+        refined_text = (payload.get("refined_text") or "").strip()
+        markdown = (payload.get("markdown") or "").strip()
+
         if text:
             self.logger.info("OCR result (%s): %s", image_path.name, text)
-            self.tts.speak(text)
         else:
             self.logger.warning("OCR result for %s contained no text.", image_path.name)
+
+        if refined_text:
+            self.logger.info("Gemini refined text (%s): %s", image_path.name, refined_text)
+            self.tts.speak(refined_text, output_name=image_path.stem)
+        else:
+            if markdown:
+                self.logger.info("Gemini markdown (%s): %s", image_path.name, markdown)
+            self.logger.warning("Skipping TTS for %s because Gemini refined text is unavailable.", image_path.name)
 
 
 # -----------------------------------------------------------------------------

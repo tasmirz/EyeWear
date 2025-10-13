@@ -65,7 +65,7 @@ flowchart TD
     responseQueue --> submit
     submit --> cleanup[Delete temp file]
     cleanup --> gemini[GeminiClient.generate_markdown()]
-    gemini --> reply[Return JSON with text/html/markdown + key_fingerprint]
+    gemini --> reply[Return JSON with text/html/markdown/refined_text + key_fingerprint]
 ```
 
 ## Device Repository Behaviour
@@ -83,8 +83,10 @@ flowchart TD
 
 ## Gemini Integration
 
-- Optional: if `GEMINI_AI_API_KEY` is missing, Markdown generation is skipped.
+- Optional: if `GEMINI_API_KEY` is missing, Markdown generation is skipped.
 - Sends OCR HTML to Gemini with a Bangla proofreading system prompt (`system_prompt.py`).
+- Converts Gemini Markdown to speech-friendly plain text (`refined_text`) for downstream TTS.
+- `GEMINI_RETRIES`/`GEMINI_RETRY_DELAY` tune automatic retry behaviour when the API returns transient errors.
 
 ## Notable Interactions
 
@@ -98,3 +100,4 @@ flowchart TD
 - Configure `JWT_SECRET` with a strong random value; tokens are symmetric HMAC.
 - Provision Redis/Gemini credentials if using `server_pipeline.py`; however, this module is self-contained and does not require Redis.
 - Monitor logs (`bbocr_server` logger) for fallback warnings (e.g., missing MongoDB or Gemini).
+- `SERVER_PORT_AUTO` (default on) allows automatic fallback to the next available port when the requested port is busy; set it to `0` to disable.
