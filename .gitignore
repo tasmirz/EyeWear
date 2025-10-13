@@ -3,5 +3,6 @@
 
 ./bborc_server/.env
 ./bborc_server/.env*.local
+./bborc_server/bbocr
 
 **/.DS_Store
