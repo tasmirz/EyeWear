@@ -63,7 +63,6 @@ def _env_bool(name: str, default: bool) -> bool:
 @dataclass
 class Config:
     server_base_url: str = field(default_factory=lambda: os.getenv("OCR_SERVER_URL", "http://127.0.0.1:8080"))
-    device_id: str = field(default_factory=lambda: os.getenv("OCR_DEVICE_ID", "pi-ocr-device"))
     keys_dir: Path = field(default_factory=lambda: Path(os.getenv("OCR_KEYS_DIR", Path(__file__).parent / "keys")))
     public_key_name: str = field(default_factory=lambda: os.getenv("OCR_PUBLIC_KEY_NAME", "device_public.pem"))
     private_key_name: str = field(default_factory=lambda: os.getenv("OCR_PRIVATE_KEY_NAME", "device_private.pem"))
@@ -349,6 +348,7 @@ class OCRClient:
         self.session = requests.Session()
         self.token: Optional[str] = None
         self.token_expiry: float = 0.0
+        self.key_fingerprint: Optional[str] = None
         self._stopped = False
 
     # --------------------------- lifecycle ---------------------------------
@@ -408,11 +408,19 @@ class OCRClient:
             raise RuntimeError("Authentication response missing token")
 
         self.token_expiry = time.time() + float(expires_in)
+        self.key_fingerprint = data.get("key_fingerprint")
         server_public_key = data.get("server_public_key")
         if server_public_key:
             self.keys.cache_server_public_key(server_public_key)
 
-        self.logger.info("Authentication successful. Token expires in %.0f seconds.", float(expires_in))
+        if self.key_fingerprint:
+            self.logger.info(
+                "Authentication successful as key %s. Token expires in %.0f seconds.",
+                self.key_fingerprint[:12],
+                float(expires_in),
+            )
+        else:
+            self.logger.info("Authentication successful. Token expires in %.0f seconds.", float(expires_in))
 
     # --------------------------- OCR processing -----------------------------
     def run(self) -> None:
@@ -507,7 +515,6 @@ class OCRClient:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Embedded OCR client")
     parser.add_argument("--server-url", help="HTTP base URL of the OCR server (default env OCR_SERVER_URL)")
-    parser.add_argument("--device-id", help="Override device identifier")
     parser.add_argument("--enqueue", metavar="IMAGE_PATH", help="Enqueue an image path and exit")
     parser.add_argument(
         "--process-image",
@@ -531,8 +538,6 @@ def main() -> None:
     config = Config()
     if args.server_url:
         config.server_base_url = args.server_url
-    if args.device_id:
-        config.device_id = args.device_id
     if args.log_level:
         config.log_level = args.log_level.upper()
     if args.no_tts:
