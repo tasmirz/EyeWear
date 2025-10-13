@@ -5,3 +5,6 @@
 ./bborc_server/.env*.local
 
 **/.DS_Store
+queue/*
+!queue/.gitkeep
+**/__pycache__

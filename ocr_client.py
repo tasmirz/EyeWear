@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 import time
+from unittest import case
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -351,18 +352,6 @@ class OCRClient:
         self.token_expiry: float = 0.0
         self._stopped = False
 
-    # --------------------------- lifecycle ---------------------------------
-    def install_signal_handlers(self) -> None:
-        def _stop_handler(signum, _frame):
-            self.logger.info("Received signal %s; shutting down.", signum)
-            self.request_stop()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                signal.signal(sig, _stop_handler)
-            except ValueError:
-                # Raised when running in an environment that forbids signal handlers.
-                pass
 
     def request_stop(self) -> None:
         self._stopped = True
@@ -525,41 +514,82 @@ def enqueue_image(config: Config, logger: logging.Logger, image_path: str) -> No
     queue.close()
     logger.info("Queued %s for OCR", image_path)
 
+from common import IPC
+from multiprocessing.shared_memory import SharedMemory
+import struct
 
+shm = SharedMemory(name="ocr_signal", create=True, size=4)
+
+def signal_handler(signum, frame):
+    action_code = struct.unpack('i', shm.buf[:4])[0]
+    print(f"Action code from shared memory: {action_code}")
+    if action_code == 1:
+        print("Starting OCR Client")
+        # Add code to start OCR Client
+    elif action_code == 2:
+        print("Stopping OCR Client")
+        # Add code to stop OCR Client
+    elif action_code == 3:
+        print("Add another image")
+        # Add code to add another image
+    elif action_code == 4:
+        print("Play/Pause")
+        # Add code to get status of OCR Client
+ 
 def main() -> None:
-    args = parse_args()
-    config = Config()
-    if args.server_url:
-        config.server_base_url = args.server_url
-    if args.device_id:
-        config.device_id = args.device_id
-    if args.log_level:
-        config.log_level = args.log_level.upper()
-    if args.no_tts:
-        config.tts_enabled = False
-
-    logger = configure_logging(config.log_level)
-
-    if args.enqueue:
-        enqueue_image(config, logger, args.enqueue)
-        if not args.process_image:
-            return
-
-    client = OCRClient(config, logger)
-    client.install_signal_handlers()
-
-    if args.process_image:
-        try:
-            client.ensure_authenticated()
-            client._process_image(args.process_image)
-        finally:
-            client.close()
-        return
-
     try:
-        client.run()
+        signal.signal(signal.SIGUSR1, signal_handler)
+        ipc = IPC("ocr_client")
+        # wait for signals to trigger actions
+        print("OCR Client is running and waiting for signals...")
+        while True:
+            signal.pause()
+        # Authenticate
+        #config = Config()
+        ##config.load_from_env()
+        #logger = configure_logging(config.log_level)
+        #client = OCRClient(config, logger)
+        #client.ensure_authenticated()
+
+    except Exception as e:
+        print(f"Error: {e}")
     finally:
-        client.close()
+        shm.close()
+        shm.unlink()
+        ipc.cleanup()
+    # args = parse_args()
+    # config = Config()
+    # if args.server_url:
+    #     config.server_base_url = args.server_url
+    # if args.device_id:
+    #     config.device_id = args.device_id
+    # if args.log_level:
+    #     config.log_level = args.log_level.upper()
+    # if args.no_tts:
+    #     config.tts_enabled = False
+
+    # logger = configure_logging(config.log_level)
+
+    # if args.enqueue:
+    #     enqueue_image(config, logger, args.enqueue)
+    #     if not args.process_image:
+    #         return
+
+    # client = OCRClient(config, logger)
+    # client.install_signal_handlers()
+
+    # if args.process_image:
+    #     try:
+    #         client.ensure_authenticated()
+    #         client._process_image(args.process_image)
+    #     finally:
+    #         client.close()
+    #     return
+
+    # try:
+    #     client.run()
+    # finally:
+    #     client.close()
 
 
 if __name__ == "__main__":

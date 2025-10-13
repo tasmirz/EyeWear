@@ -11,6 +11,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 class IPC:
+    pid_file_location = "/tmp/.pid/"
     def __init__(self, filename):
         self.filename = filename
         self.pidfile = f".pid/{self.filename}.pid"
@@ -22,14 +23,14 @@ class IPC:
 
     def create_pidfile(self, filename):
         # Ensure the .pid directory exists
-        if not os.path.exists(".pid"):
-            os.makedirs(".pid")
+        if not os.path.exists(self.pid_file_location):
+            os.makedirs(self.pid_file_location)
         pid = os.getpid()
-        pidfile = f".pid/{filename}.pid"
+        pidfile = f"{self.pid_file_location}/{filename}.pid"
         with open(pidfile, "w") as f:
             f.write(str(pid))
         # Register cleanup function
-        atexit.register(lambda: os.remove(pidfile))
+        atexit.register(self.cleanup)
 
     # WILL DO LATER:
 # while sending signal, check if the pid exists in dictionary {
@@ -38,7 +39,7 @@ class IPC:
 # if does not exist in dictionary but the pidfile exists and is a python process, cache in a dictionary
 # 
     def read_pid(self, filename):
-        pidfile = f".pid/{filename}.pid"
+        pidfile = f"{self.pid_file_location}/{filename}.pid"
         try:
             with open(pidfile, "r") as f:
                 pid = int(f.read().strip())
@@ -66,6 +67,10 @@ class IPC:
                 logging.error(f"Permission denied to send signal to PID {pid}.")
         else:
             logging.error(f"Could not find PID for process {process_name}.")
+    def cleanup(self):
+        if os.path.exists(self.pidfile):
+            os.remove(self.pidfile)
+            logging.info(f"Removed PID file {self.pidfile}.")
 
 class Logger:
     def __init__(self, tag):

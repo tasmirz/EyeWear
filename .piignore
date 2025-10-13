@@ -1,3 +1,8 @@
-callserver
-bbocr
+call_server
+bbocr_server
 .pid
+queue
+.venv
+.vscode
+__pycache__
+docs
