@@ -6,3 +6,4 @@ queue
 .vscode
 __pycache__
 docs
+gstreamer-rtc/node_modules

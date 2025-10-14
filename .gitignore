@@ -7,3 +7,4 @@ queue/*
 .env
 .env*.local
 keys
+**/node_modules

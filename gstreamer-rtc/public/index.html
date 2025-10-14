@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Operator WebRTC Viewer</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; background: #f5f5f5; }
+    .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    video { width: 100%; border: 2px solid #ddd; margin-top: 20px; border-radius: 5px; background: #000; }
+    select, button { padding: 10px 15px; margin: 5px; font-size: 16px; }
+    .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+    .status.connected { background: #d4edda; color: #155724; }
+    .status.disconnected { background: #f8d7da; color: #721c24; }
+    .debug { background: #f8f9fa; padding: 10px; margin: 10px 0; border-radius: 5px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; }
+    .video-container { position: relative; }
+    .click-overlay { 
+      position: absolute; 
+      top: 0; 
+      left: 0; 
+      width: 100%; 
+      height: 100%; 
+      background: rgba(0,0,0,0.7); 
+      color: white; 
+      display: flex; 
+      align-items: center; 
+      justify-content: center; 
+      cursor: pointer;
+      border-radius: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Operator WebRTC Viewer</h2>
+    
+    <div class="controls">
+      <label>Select Pi:</label>
+      <select id="piList">
+        <option value="">-- Select a Pi --</option>
+      </select>
+      <button id="connectBtn">Connect</button>
+      <button id="disconnectBtn" disabled>Disconnect</button>
+    </div>
+    
+    <div id="status" class="status disconnected">
+      Status: Disconnected
+    </div>
+    
+    <div class="video-container">
+      <video id="remoteVideo" autoplay playsinline muted></video>
+      <div id="clickOverlay" class="click-overlay" style="display: none;">
+        <div>Click to start video</div>
+      </div>
+    </div>
+    
+    <div class="debug" id="debugLog">
+      Debug log will appear here...
+    </div>
+  </div>
+
+  <script>
+    let ws = null;
+    let peerConnection = null;
+    let selectedPi = null;
+    const debugLog = document.getElementById('debugLog');
+    const statusDiv = document.getElementById('status');
+    const clickOverlay = document.getElementById('clickOverlay');
+    const remoteVideo = document.getElementById('remoteVideo');
+
+    function log(message) {
+      const timestamp = new Date().toLocaleTimeString();
+      debugLog.innerHTML += `[${timestamp}] ${message}\n`;
+      debugLog.scrollTop = debugLog.scrollHeight;
+      console.log(message);
+    }
+
+    function updateStatus(connected, message = '') {
+      if (connected) {
+        statusDiv.className = 'status connected';
+        statusDiv.textContent = `Status: Connected to ${selectedPi}` + (message ? ` - ${message}` : '');
+      } else {
+        statusDiv.className = 'status disconnected';
+        statusDiv.textContent = `Status: Disconnected` + (message ? ` - ${message}` : '');
+      }
+    }
+
+    function connectWebSocket() {
+      const serverUrl = `ws://${location.hostname}:8081`;
+      log(`Connecting to ${serverUrl}...`);
+      
+      ws = new WebSocket(serverUrl);
+      
+      ws.onopen = () => {
+        log("✓ Connected to signaling server");
+        ws.send(JSON.stringify({ type: "register", role: "operator" }));
+        updateStatus(false, "Waiting for Pi...");
+      };
+
+      ws.onmessage = async (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          log(`← Received: ${data.type}`);
+          
+          if (data.type === "pi_list") {
+            updatePiList(data.pis);
+          }
+          else if (data.type === "pi_available") {
+            addPiOption(data.piId);
+          }
+          else if (data.type === "pi_disconnected") {
+            removePiOption(data.piId);
+          }
+          else if (data.type === "offer") {
+            await handleOffer(data.sdp, data.from);
+          }
+          else if (data.type === "candidate") {
+            await handleIceCandidate(data.candidate);
+          }
+          else if (data.type === "peer_disconnected") {
+            log("Peer disconnected");
+            cleanupConnection();
+          }
+        } catch (e) {
+          log(`Error processing message: ${e}`);
+        }
+      };
+
+      ws.onclose = () => {
+        log("WebSocket connection closed");
+        updateStatus(false, "Signaling server disconnected");
+        setTimeout(connectWebSocket, 3000);
+      };
+
+      ws.onerror = (error) => {
+        log(`WebSocket error: ${error}`);
+      };
+    }
+
+    function updatePiList(pis) {
+      const piList = document.getElementById('piList');
+      piList.innerHTML = '<option value="">-- Select a Pi --</option>';
+      pis.forEach(piId => addPiOption(piId));
+    }
+
+    function addPiOption(id) {
+      const piList = document.getElementById('piList');
+      if (!document.getElementById(`pi-${id}`)) {
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.id = `pi-${id}`;
+        opt.textContent = `Pi: ${id}`;
+        piList.appendChild(opt);
+      }
+    }
+
+    function removePiOption(id) {
+      const opt = document.getElementById(`pi-${id}`);
+      if (opt) opt.remove();
+    }
+
+    document.getElementById('connectBtn').onclick = async () => {
+      const piList = document.getElementById('piList');
+      selectedPi = piList.value;
+      
+      if (!selectedPi) {
+        alert("Please select a Pi first");
+        return;
+      }
+
+      log(`Initiating call to Pi: ${selectedPi}`);
+      ws.send(JSON.stringify({ type: "start_call", piId: selectedPi }));
+      
+      document.getElementById('connectBtn').disabled = true;
+      document.getElementById('disconnectBtn').disabled = false;
+      updateStatus(false, "Connecting...");
+    };
+
+    document.getElementById('disconnectBtn').onclick = () => {
+      cleanupConnection();
+    };
+
+    // Click overlay to start video
+    clickOverlay.onclick = async () => {
+      try {
+        await remoteVideo.play();
+        clickOverlay.style.display = 'none';
+        log("✓ Video playback started by user interaction");
+      } catch (e) {
+        log(`❌ Failed to start video: ${e}`);
+      }
+    };
+
+    async function handleOffer(sdp, from) {
+      log(`Received offer from ${from}, creating answer...`);
+      
+      try {
+        // Create new peer connection for each call
+        if (peerConnection) {
+          peerConnection.close();
+        }
+        
+        peerConnection = createPeerConnection();
+        
+        const offer = new RTCSessionDescription({ type: "offer", sdp });
+        await peerConnection.setRemoteDescription(offer);
+        log("✓ Remote description set");
+        
+        // Log the SDP to check codecs
+        log(`SDP offer preview: ${sdp.substring(0, 200)}...`);
+        
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        log("✓ Local description set");
+        
+        // Log transceivers to debug
+        const transceivers = peerConnection.getTransceivers();
+        log(`Transceivers count: ${transceivers.length}`);
+        transceivers.forEach((transceiver, i) => {
+          log(`Transceiver ${i}: ${transceiver.currentDirection} - ${transceiver.receiver.track ? transceiver.receiver.track.kind : 'no track'}`);
+        });
+        
+        // Send answer back to Pi
+        ws.send(JSON.stringify({ 
+          type: "answer", 
+          sdp: answer.sdp, 
+          to: from 
+        }));
+        log("✓ Answer sent to Pi");
+        
+        updateStatus(true, "Connected - waiting for video...");
+        
+      } catch (e) {
+        log(`Error handling offer: ${e}`);
+        cleanupConnection();
+      }
+    }
+
+    async function handleIceCandidate(candidateData) {
+      if (peerConnection && candidateData) {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(candidateData));
+          log("✓ Added remote ICE candidate");
+        } catch (e) {
+          log(`Error adding ICE candidate: ${e}`);
+        }
+      }
+    }
+
+    function createPeerConnection() {
+      log("Creating new peer connection...");
+      
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" }
+        ],
+        // Force H.264 codec preference
+        sdpSemantics: 'unified-plan'
+      });
+
+      pc.onconnectionstatechange = () => {
+        log(`Connection state: ${pc.connectionState}`);
+        if (pc.connectionState === 'connected') {
+          updateStatus(true, "WebRTC connected - check video");
+          // Show click overlay for autoplay
+          clickOverlay.style.display = 'flex';
+        } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+          updateStatus(false, "WebRTC disconnected");
+          clickOverlay.style.display = 'none';
+        }
+      };
+
+      pc.onsignalingstatechange = () => {
+        log(`Signaling state: ${pc.signalingState}`);
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        log(`ICE connection state: ${pc.iceConnectionState}`);
+        if (pc.iceConnectionState === 'connected') {
+          log("✓ ICE connected - video should work now");
+        }
+      };
+
+      pc.onicegatheringstatechange = () => {
+        log(`ICE gathering state: ${pc.iceGatheringState}`);
+      };
+
+      pc.ontrack = (event) => {
+        log(`🎬 Received remote track: ${event.track.kind}`);
+        log(`Track id: ${event.track.id}, readyState: ${event.track.readyState}`);
+        log(`Streams received: ${event.streams.length}`);
+        
+        if (event.streams && event.streams.length > 0) {
+          log(`Attaching stream with ${event.streams[0].getTracks().length} tracks`);
+          remoteVideo.srcObject = event.streams[0];
+        } else {
+          log("Creating new stream from track");
+          const stream = new MediaStream([event.track]);
+          remoteVideo.srcObject = stream;
+        }
+        
+        // Set up track ended handler
+        event.track.onended = () => {
+          log("Video track ended");
+        };
+        
+        event.track.onmute = () => {
+          log("Video track muted");
+        };
+        
+        event.track.onunmute = () => {
+          log("Video track unmuted");
+        };
+
+        // Try to play the video
+        setTimeout(() => {
+          remoteVideo.play().then(() => {
+            log("✓ Video playback started automatically");
+            clickOverlay.style.display = 'none';
+          }).catch(e => {
+            log(`⚠ Autoplay blocked: ${e}. Click the video to start.`);
+            clickOverlay.style.display = 'flex';
+          });
+        }, 1000);
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && ws) {
+          ws.send(JSON.stringify({
+            type: "candidate",
+            candidate: event.candidate,
+            to: selectedPi
+          }));
+          log("→ Sent ICE candidate");
+        } else if (!event.candidate) {
+          log("✓ ICE gathering complete");
+        }
+      };
+
+      return pc;
+    }
+
+    function cleanupConnection() {
+      log("Cleaning up connection...");
+      
+      if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+      }
+      
+      remoteVideo.srcObject = null;
+      clickOverlay.style.display = 'none';
+      
+      document.getElementById('connectBtn').disabled = false;
+      document.getElementById('disconnectBtn').disabled = true;
+      
+      updateStatus(false, "Ready to connect");
+    }
+
+    // Initialize
+    connectWebSocket();
+  </script>
+</body>
+</html>
