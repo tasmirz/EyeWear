@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebRTC Pi Camera Stream</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        h1 {
+            text-align: center;
+            color: #4CAF50;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        #videoContainer {
+            width: 100%;
+            max-width: 1280px;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button.start {
+            background: #4CAF50;
+            color: white;
+        }
+        button.start:hover {
+            background: #45a049;
+        }
+        button.stop {
+            background: #f44336;
+            color: white;
+        }
+        button.stop:hover {
+            background: #da190b;
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px 20px;
+            border-radius: 4px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .status.connected {
+            background: #4CAF50;
+        }
+        .status.disconnected {
+            background: #f44336;
+        }
+        .status.connecting {
+            background: #ff9800;
+        }
+        .audio-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 20px;
+            background: #333;
+            border-radius: 4px;
+        }
+        .audio-level {
+            width: 200px;
+            height: 20px;
+            background: #555;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .audio-level-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #8BC34A, #CDDC39);
+            width: 0%;
+            transition: width 0.1s;
+        }
+        .error {
+            background: #f44336;
+            color: white;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+            display: none;
+        }
+        .error.show {
+            display: block;
+        }
+        .warning {
+            background: #ff9800;
+            color: white;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎥 Raspberry Pi Camera Stream</h1>
+    <div class="container">
+        <div id="httpsWarning" class="warning" style="display: none;">
+            ⚠️ <strong>HTTPS Required:</strong> Microphone access requires HTTPS. 
+            <br>Please access this page via <strong>https://</strong> and accept the security certificate.
+        </div>
+
+        <div id="errorMsg" class="error"></div>
+        
+        <div id="videoContainer">
+            <video id="remoteVideo" autoplay playsinline></video>
+        </div>
+        
+        <div class="status disconnected" id="status">Disconnected</div>
+        
+        <div class="audio-indicator">
+            <span>🎤 Your Audio:</span>
+            <div class="audio-level">
+                <div class="audio-level-bar" id="audioLevel"></div>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button class="start" id="startBtn" onclick="start()">Start Stream</button>
+            <button class="stop" id="stopBtn" onclick="stop()" disabled>Stop Stream</button>
+        </div>
+    </div>
+
+    <script>
+        let pc = null;
+        let localStream = null;
+        let audioContext = null;
+        let analyser = null;
+        
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const status = document.getElementById('status');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const audioLevel = document.getElementById('audioLevel');
+        const errorMsg = document.getElementById('errorMsg');
+        const httpsWarning = document.getElementById('httpsWarning');
+
+        // Check if we're on HTTPS or localhost
+        function checkSecureContext() {
+            const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+            const isHttps = location.protocol === 'https:';
+            
+            if (!isHttps && !isLocalhost) {
+                httpsWarning.style.display = 'block';
+                return false;
+            }
+            
+            // Check if getUserMedia is available
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                showError('Your browser does not support getUserMedia. Please use a modern browser (Chrome, Firefox, Safari, Edge).');
+                return false;
+            }
+            
+            return true;
+        }
+
+        function showError(message) {
+            errorMsg.textContent = '❌ Error: ' + message;
+            errorMsg.classList.add('show');
+            setTimeout(() => {
+                errorMsg.classList.remove('show');
+            }, 10000);
+        }
+
+        function updateStatus(state, text) {
+            status.className = `status ${state}`;
+            status.textContent = text;
+        }
+
+        async function start() {
+            try {
+                // Check secure context first
+                if (!checkSecureContext()) {
+                    showError('Microphone access requires HTTPS or localhost. Please use https:// to access this page.');
+                    return;
+                }
+
+                startBtn.disabled = true;
+                updateStatus('connecting', 'Connecting...');
+
+                // Get local audio stream (microphone)
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        },
+                        video: false
+                    });
+                } catch (err) {
+                    if (err.name === 'NotAllowedError') {
+                        throw new Error('Microphone permission denied. Please allow microphone access and try again.');
+                    } else if (err.name === 'NotFoundError') {
+                        throw new Error('No microphone found. Please connect a microphone and try again.');
+                    } else if (err.name === 'NotSupportedError') {
+                        throw new Error('HTTPS is required for microphone access. Please use https:// in the URL.');
+                    } else {
+                        throw new Error('Failed to access microphone: ' + err.message);
+                    }
+                }
+
+                // Setup audio level monitoring
+                setupAudioMonitoring(localStream);
+
+                // Create peer connection
+                pc = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
+
+                // Add transceiver for receiving video from Pi
+                pc.addTransceiver('video', { direction: 'recvonly' });
+                
+                // Add local audio track for sending to Pi
+                localStream.getTracks().forEach(track => {
+                    pc.addTrack(track, localStream);
+                });
+
+                // Handle incoming tracks
+                pc.ontrack = (event) => {
+                    console.log('Received track:', event.track.kind);
+                    if (event.track.kind === 'video') {
+                        remoteVideo.srcObject = event.streams[0];
+                    } else if (event.track.kind === 'audio') {
+                        // Audio from Pi (if available)
+                        console.log('Received audio track from Pi');
+                    }
+                };
+
+                // Monitor connection state
+                pc.onconnectionstatechange = () => {
+                    console.log('Connection state:', pc.connectionState);
+                    switch(pc.connectionState) {
+                        case 'connected':
+                            updateStatus('connected', 'Connected ✓');
+                            break;
+                        case 'disconnected':
+                            updateStatus('disconnected', 'Disconnected');
+                            break;
+                        case 'failed':
+                            updateStatus('disconnected', 'Connection Failed');
+                            showError('Connection failed. Please check your network and try again.');
+                            break;
+                        case 'closed':
+                            updateStatus('disconnected', 'Connection Closed');
+                            break;
+                    }
+                };
+
+                // ICE connection state
+                pc.oniceconnectionstatechange = () => {
+                    console.log('ICE connection state:', pc.iceConnectionState);
+                };
+
+                // Create and send offer
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                const response = await fetch('/offer', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        sdp: pc.localDescription.sdp,
+                        type: pc.localDescription.type
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Server returned error: ' + response.status);
+                }
+
+                const answer = await response.json();
+                await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+                stopBtn.disabled = false;
+                updateStatus('connecting', 'Connecting...');
+
+            } catch (err) {
+                console.error('Error starting stream:', err);
+                showError(err.message);
+                startBtn.disabled = false;
+                updateStatus('disconnected', 'Connection Failed');
+                
+                // Cleanup on error
+                if (localStream) {
+                    localStream.getTracks().forEach(track => track.stop());
+                    localStream = null;
+                }
+                if (pc) {
+                    pc.close();
+                    pc = null;
+                }
+            }
+        }
+
+        function setupAudioMonitoring(stream) {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+                function updateLevel() {
+                    if (!analyser) return;
+                    
+                    analyser.getByteFrequencyData(dataArray);
+                    const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                    const level = (average / 255) * 100;
+                    audioLevel.style.width = level + '%';
+
+                    requestAnimationFrame(updateLevel);
+                }
+                updateLevel();
+            } catch (err) {
+                console.error('Error setting up audio monitoring:', err);
+            }
+        }
+
+        function stop() {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+                analyser = null;
+            }
+
+            remoteVideo.srcObject = null;
+            audioLevel.style.width = '0%';
+            
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            updateStatus('disconnected', 'Disconnected');
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', stop);
+
+        // Check secure context on load
+        window.addEventListener('load', () => {
+            checkSecureContext();
+        });
+    </script>
+</body>
+</html>

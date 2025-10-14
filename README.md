@@ -1,8 +1,8 @@
 # Embedded OCR Pipeline (Raspberry Pi)
 
 This folder hosts a minimal end-to-end pipeline for capturing images, sending
-them to an OCR service, and forwarding the recognised text to Gemini and (optionally) a local
-text-to-speech (TTS) handler. It is designed for resource-constrained devices such
+them to an OCR service, routing the recognised text through Gemini for polishing, and (optionally) speaking the refined
+output via a local text-to-speech (TTS) handler. It is designed for resource-constrained devices such
 as Raspberry Pi Zero 2.
 
 ---
@@ -16,11 +16,10 @@ as Raspberry Pi Zero 2.
 
 - **`ocr_client.py`**  
   Command-line client that watches an image queue, authenticates with the server,
-  uploads images, and pipes recognised text to TTS.
+  uploads images, and speaks Gemini-refined text when TTS is enabled.
 
 - **`tts_pipeline.py`**  
-  Lightweight TTS helper (defaults to the Bangla `bn` voice in `espeak-ng`) and
-  can route audio through ALSA/BlueZ when a Bluetooth headset is available.
+  Lightweight TTS helper using Meta's MMS-TTS (`facebook/mms-tts-ben` by default); ingests Gemini-refined text and emits MP3 files (one per utterance).
 
 - **Other Helpers**  
   `take_image.py` captures camera stills; queue backends (POSIX message queue or filesystem) connect producers and the OCR client.
@@ -46,26 +45,55 @@ If these files are missing, the server automatically falls back to
 
    ```bash
    sudo apt update
-   sudo apt install python3 python3-pip espeak-ng alsa-utils bluetooth \
+   sudo apt install python3 python3-pip ffmpeg \
        libblas-dev liblapack-dev libatlas-base-dev tesseract-ocr tesseract-ocr-ben
    ```
 
-   _Install `espeak-ng` to access the Bangla (`bn`) voice used by the TTS pipeline; `alsa-utils` and `bluetooth` are only needed if you plan to play audio._
+   _Install `ffmpeg` for MP3 conversion. For TTS, install PyTorch/Transformers:_  
+   `pip3 install torch --index-url https://download.pytorch.org/whl/cpu`  
+   `pip3 install transformers accelerate`
 
-2. **Python Dependencies**
+2. **MMS-TTS Configuration**
+
+   `tts_pipeline.py` loads `facebook/mms-tts-ben` from Hugging Face. Set optional overrides before launching the client:
+
+   ```bash
+   export MMS_TTS_MODEL_ID="facebook/mms-tts-ben"   # change to another MMS voice if desired
+   export MMS_TTS_DEVICE="cpu"                      # or 'cuda'
+   export MMS_TTS_DTYPE="float32"                   # fp16/bf16 supported on compatible hardware
+   export MMS_TTS_SPEAKER="speaker_id_or_name"      # optional for multi-speaker checkpoints
+   export TTS_OUTPUT_DIR="/path/to/store/mp3s"      # optional output directory (defaults to cwd)
+   ```
+
+3. **(Recommended) Isolated Virtual Environment**
+
+   Because this project depends on specific versions of `torch`, `transformers`, and other packages that may conflict with globally installed tools, create a dedicated virtual environment before installing requirements:
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate         # on Windows use: .venv\Scripts\activate
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+   When you are done working on the project, run `deactivate` to leave the environment.
+
+4. **Python Dependencies**
 
    ```bash
    pip3 install flask flask-cors requests pyjwt cryptography pillow pytesseract
    pip3 install python-multipart  # only needed if the server runs under Uvicorn/FastAPI
    ```
 
-3. **Environment Variables**
+5. **Environment Variables**
    Copy `.env.local` (or create a new `.env`) under `embedded_base/bbocr_server`
    providing at least:
 
    ```*
-   GEMINI_AI_API_KEY="your_google_genai_key"
-   GEMINI_AI_MODEL="gemini-2.0-flash"  # or preferred model
+   GEMINI_API_KEY="your_google_genai_key"
+   GEMINI_MODEL="gemini-2.0-flash"  # or preferred model
+   GEMINI_RETRIES=3                 # optional: retry Gemini calls on 5xx
+   GEMINI_RETRY_DELAY=1.5           # optional: seconds between retries
    ```
 
    The server automatically loads `.env` and `.env.local` on startup.
@@ -74,15 +102,15 @@ If these files are missing, the server automatically falls back to
 
 ## Usage Guide
 
-| Step                 | Command                                                                                                                                               | Notes                                                                                                |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| 1. Start server      | `cd embedded_base/bbocr_server`<br>`export $(grep -v '^#' .env.local \| xargs)`<br>`SERVER_PORT=8080 python3 server.py > /tmp/bbocr_flask.log 2>&1 &` | Launches the Flask OCR service (loads Bangla models if available). Use another port if 8080 is busy. |
-| 2. Health check      | `curl -s http://127.0.0.1:8080/health`                                                                                                                | Confirms the server is listening.                                                                    |
-| 3a. Queue image      | `python3 embedded_base/ocr_client.py --enqueue embedded_base/test_images/sample.jpg`                                                                  | Adds an image to the filesystem/POSIX queue. Repeat per image.                                       |
-| 3b. Quick single-run | `python3 embedded_base/ocr_client.py --process-image embedded_base/test_images/sample.jpg --no-tts`                                                   | Skips the queue; authenticates, uploads once, prints OCR + Gemini response.                          |
-| 4. Continuous client | `python3 embedded_base/ocr_client.py --no-tts --log-level INFO`                                                                                       | Consumes the queue, uploads images, prints raw OCR text.                                             |
-| 5. Review Gemini     | `tail -f /tmp/bbocr_flask.log`                                                                                                                        | Gemini Markdown summaries logged after each OCR result.                                              |
-| 6. Optional TTS      | `python3 embedded_base/ocr_client.py --log-level INFO`                                                                                                | Enables Bangla TTS; configure `TTS_BLUETOOTH_MAC`/`TTS_AUDIO_DEVICE` as needed.                      |
+| Step                 | Command                                                                                                                                               | Notes                                                                                                                      |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 1. Start server      | `cd embedded_base/bbocr_server`<br>`export $(grep -v '^#' .env.local \| xargs)`<br>`SERVER_PORT=8080 python3 server.py > /tmp/bbocr_flask.log 2>&1 &` | Launches the Flask OCR service (loads Bangla models if available). Use another port if 8080 is busy.                       |
+| 2. Health check      | `curl -s http://127.0.0.1:8080/health`                                                                                                                | Confirms the server is listening.                                                                                          |
+| 3a. Queue image      | `python3 embedded_base/ocr_client.py --enqueue embedded_base/test_images/sample.jpg`                                                                  | Adds an image to the filesystem/POSIX queue. Repeat per image.                                                             |
+| 3b. Quick single-run | `python3 embedded_base/ocr_client.py --process-image embedded_base/test_images/sample.jpg --no-tts`                                                   | Skips the queue; authenticates, uploads once, prints OCR + Gemini response.                                                |
+| 4. Continuous client | `python3 embedded_base/ocr_client.py --no-tts --log-level INFO`                                                                                       | Consumes the queue, uploads images, prints raw OCR text.                                                                   |
+| 5. Review Gemini     | `tail -f /tmp/bbocr_flask.log`                                                                                                                        | Gemini Markdown summaries logged after each OCR result.                                                                    |
+| 6. Optional TTS      | `python3 embedded_base/ocr_client.py --log-level INFO`                                                                                                | Enables Bangla TTS with Gemini-refined text; ensure MMS env vars (`MMS_TTS_MODEL_ID`, etc.) are set if you need overrides. |
 
 ### 1. Start the OCR Server
 
@@ -98,7 +126,7 @@ Verify it is running:
 curl -s http://127.0.0.1:8080/health
 ```
 
-If the port is already in use, either kill the existing process:
+If the requested port is already in use, the server logs a warning and falls back to the next available port (set `SERVER_PORT_AUTO=0` to disable this). To free the original port manually, either kill the existing process:
 
 ```bash
 lsof -i tcp:8080
@@ -134,7 +162,7 @@ The client will:
 
 1. Authenticate with the server (RSA challenge/response).
 2. Pull queued filenames, upload them via REST, and print the OCR text.
-3. Receive Gemini Markdown refinements (logged by the server and included in the JSON response).
+3. Receive Gemini Markdown + `refined_text` (logged by the server and included in the JSON response).
 
 Increase verbosity with `--log-level DEBUG` if you want to inspect full payloads.
 Press `Ctrl+C` to stop once the queue is empty.
@@ -152,18 +180,13 @@ Gemini and logs the returned Markdown after spelling/grammar corrections.
 
 ### 5. (Optional) Test TTS
 
-To pipe recognised text into audio:
+To generate MP3s for Gemini-refined Bangla text (skips audio if Gemini is disabled or returns nothing):
 
 ```bash
 python3 embedded_base/ocr_client.py --log-level INFO
 ```
 
-Ensure `tts_pipeline.py` can find `espeak-ng` (Bangla voice `bn` is used by default); set Bluetooth variables if you want audio on a headset:
-
-```bash
-export TTS_BLUETOOTH_MAC="AA:BB:CC:DD:EE:FF"
-export TTS_AUDIO_DEVICE="bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp"
-```
+Ensure `tts_pipeline.py` can load the MMS-TTS checkpoint (`facebook/mms-tts-ben` by default) and that PyTorch/Transformers are installed. MP3 files are stored in `TTS_OUTPUT_DIR` (defaults to the client working directory).
 
 ---
 
@@ -173,9 +196,9 @@ export TTS_AUDIO_DEVICE="bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp"
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `403 Forbidden` on client       | Confirm the client uses HTTP REST (`ocr_client.py`) and the server is running.                                                                                  |
 | `Signature verification failed` | Ensure both server and client use the updated `cryptography` version and that the device public key is registered (see `bbocr_server/authorized_devices.json`). |
-| Gemini errors in log            | Check that `GEMINI_AI_API_KEY`/`GEMINI_AI_MODEL` are set and valid; inspect `/tmp/bbocr_flask.log` for HTTP codes from the Gemini API.                          |
+| Gemini errors in log            | Check that `GEMINI_API_KEY`/`GEMINI_MODEL` are set and valid; inspect `/tmp/bbocr_flask.log` for HTTP codes from the Gemini API.                                |
 | Bengali OCR accuracy is poor    | Verify `bnocr.onnx` and `best.pt` are present; without them the server uses the pytesseract fallback (requires `tesseract-ocr-ben`).                            |
-| Bluetooth/TTS silent            | Confirm `espeak-ng` is installed, the headset is paired, and ALSA device name is correct.                                                                       |
+| Bluetooth/TTS silent            | Confirm the MMS model downloads succeed (check Hugging Face cache), `ffmpeg` is installed, and Gemini is returning `refined_text` in the OCR response.          |
 
 ---
 
