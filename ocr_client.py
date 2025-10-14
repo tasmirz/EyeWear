@@ -7,7 +7,7 @@ Workflow
 2. POST /get_challenge with the public key, sign the challenge, obtain JWT.
 3. Watch the image queue (POSIX message queue if available, otherwise a simple
    directory) for filenames to process.
-4. Upload images to /ocr and forward recognised text to the TTS pipeline.
+4. Upload images to /ocr, receive Gemini refinements, and forward the refined text to the TTS pipeline.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ import argparse
 import base64
 import logging
 import os
+import queue
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,7 +25,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
+from multiprocessing.managers import BaseManager
 
 try:
     import requests
@@ -53,11 +56,36 @@ def configure_logging(level: str) -> logging.Logger:
     return logger
 
 
+def _html_to_text(html_content: str) -> str:
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        return soup.get_text(separator=" ", strip=True)
+    except Exception:
+        import re
+
+        text = re.sub(r"<[^>]+>", " ", html_content)
+        return " ".join(text.split())
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+class PipelineRequestManager(BaseManager):
+    pass
+
+
+class PipelineResultManager(BaseManager):
+    pass
+
+
+PipelineRequestManager.register("get_queue")
+PipelineResultManager.register("out_queue")
 
 
 @dataclass
@@ -77,6 +105,29 @@ class Config:
         default_factory=lambda: Path(os.getenv("TTS_PIPELINE_SCRIPT", Path(__file__).parent / "tts_pipeline.py"))
     )
     log_level: str = field(default_factory=lambda: os.getenv("OCR_CLIENT_LOG_LEVEL", "INFO"))
+    pipeline_host: str = field(default_factory=lambda: os.getenv("PIPELINE_HOST", "127.0.0.1"))
+    pipeline_port: str = field(default_factory=lambda: os.getenv("PIPELINE_PORT", "50000"))
+    pipeline_authkey: str = field(default_factory=lambda: os.getenv("PIPELINE_AUTHKEY", "abcf"))
+    pipeline_out_host: str = field(default_factory=lambda: os.getenv("PIPELINE_OUT_HOST", "127.0.0.1"))
+    pipeline_out_port: str = field(default_factory=lambda: os.getenv("PIPELINE_OUT_PORT", "50001"))
+    pipeline_out_authkey: str = field(default_factory=lambda: os.getenv("PIPELINE_OUT_AUTHKEY", "abcfe"))
+    pipeline_base_dir: Path = field(
+        default_factory=lambda: Path(
+            os.getenv(
+                "PIPELINE_WORKDIR",
+                Path(__file__).resolve().parents[1] / "bbocr_server",
+            )
+        )
+    )
+    pipeline_drop_dir: Path = field(
+        default_factory=lambda: Path(
+            os.getenv(
+                "PIPELINE_DROP_DIR",
+                Path(__file__).resolve().parents[1] / "bbocr_server" / "tmp" / "client_drop",
+            )
+        )
+    )
+    pipeline_timeout: float = field(default_factory=lambda: float(os.getenv("PIPELINE_TIMEOUT", "120")))
 
     def __post_init__(self) -> None:
         self.server_base_url = self.server_base_url.rstrip("/")
@@ -85,6 +136,16 @@ class Config:
         self.image_base_dir = self.image_base_dir.expanduser().resolve()
         self.tts_script = self.tts_script.expanduser().resolve()
         self.log_level = self.log_level.upper()
+        self.pipeline_base_dir = self.pipeline_base_dir.expanduser().resolve()
+        self.pipeline_drop_dir = self.pipeline_drop_dir.expanduser().resolve()
+        try:
+            self.pipeline_port = int(self.pipeline_port)
+        except ValueError:
+            self.pipeline_port = 50000
+        try:
+            self.pipeline_out_port = int(self.pipeline_out_port)
+        except ValueError:
+            self.pipeline_out_port = 50001
 
     @property
     def get_challenge_url(self) -> str:
@@ -284,8 +345,13 @@ class TTSSink:
         self.logger = logger
         self.enabled = enabled
         self._process: Optional[subprocess.Popen[str]] = None
+        self.output_dir = Path(os.getenv("TTS_OUTPUT_DIR") or Path.cwd()).expanduser().resolve()
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.logger.warning("Unable to create TTS output directory %s: %s", self.output_dir, exc)
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, output_name: Optional[str] = None) -> None:
         clean = text.strip()
         if not clean:
             return
@@ -298,15 +364,41 @@ class TTSSink:
             self.logger.warning("TTS script %s not found. Text: %s", self.script_path, clean)
             return
 
+        mp3_path: Optional[Path] = None
+        wait_dir = self.output_dir
+        env = None
+        if output_name:
+            mp3_path = wait_dir / f"{output_name}.mp3"
+            try:
+                mp3_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
         if self._process is None or self._process.poll() is not None:
             try:
+                env = os.environ.copy()
+                if "TTS_OUTPUT_DIR" in env:
+                    try:
+                        wait_dir = Path(env["TTS_OUTPUT_DIR"]).expanduser().resolve()
+                    except Exception:
+                        wait_dir = self.output_dir
+                else:
+                    env["TTS_OUTPUT_DIR"] = str(wait_dir)
+                try:
+                    wait_dir.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    self.logger.warning("Unable to ensure TTS output directory %s: %s", wait_dir, exc)
+                if mp3_path is not None:
+                    mp3_path = wait_dir / mp3_path.name
                 self._process = subprocess.Popen(
                     [sys.executable, str(self.script_path)],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     text=True,
+                    env=env,
                 )
+                self.output_dir = wait_dir
             except Exception as exc:
                 self.logger.error("Failed to launch TTS pipeline: %s", exc)
                 self._process = None
@@ -315,12 +407,24 @@ class TTSSink:
 
         assert self._process.stdin is not None
         try:
-            self._process.stdin.write(clean + "\n")
+            line = clean if output_name is None else f"{output_name}|{clean}"
+            self._process.stdin.write(line + "\n")
             self._process.stdin.flush()
         except (BrokenPipeError, ValueError) as exc:
             self.logger.error("Writing to TTS pipeline failed: %s", exc)
             self._process = None
             self.logger.info("TTS fallback output: %s", clean)
+            return
+
+        if mp3_path:
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                if mp3_path.exists():
+                    self.logger.info("TTS MP3 generated: %s", mp3_path)
+                    break
+                time.sleep(0.1)
+            else:
+                self.logger.warning("Expected TTS MP3 %s but it was not created.", mp3_path)
 
     def close(self) -> None:
         if self._process and self._process.poll() is None:
@@ -350,6 +454,10 @@ class OCRClient:
         self.token_expiry: float = 0.0
         self.key_fingerprint: Optional[str] = None
         self._stopped = False
+        self._pipeline_request_manager: Optional[BaseManager] = None
+        self._pipeline_result_manager: Optional[BaseManager] = None
+        self._pipeline_request_queue = None
+        self._pipeline_result_queue = None
 
     # --------------------------- lifecycle ---------------------------------
     def install_signal_handlers(self) -> None:
@@ -371,6 +479,20 @@ class OCRClient:
         self.queue.close()
         self.tts.close()
         self.session.close()
+        if self._pipeline_request_manager is not None:
+            try:
+                self._pipeline_request_manager.shutdown()
+            except Exception:
+                pass
+        if self._pipeline_result_manager is not None:
+            try:
+                self._pipeline_result_manager.shutdown()
+            except Exception:
+                pass
+        self._pipeline_request_manager = None
+        self._pipeline_result_manager = None
+        self._pipeline_request_queue = None
+        self._pipeline_result_queue = None
 
     # --------------------------- authentication -----------------------------
     def ensure_authenticated(self) -> None:
@@ -459,6 +581,12 @@ class OCRClient:
             return
 
         self.logger.info("Submitting %s for OCR", image_path)
+
+        pipeline_payload = self._process_via_pipeline(image_path)
+        if pipeline_payload is not None:
+            self._handle_ocr_payload(image_path, pipeline_payload)
+            return
+
         try:
             with image_path.open("rb") as fh:
                 files = {"file": (image_path.name, fh, "application/octet-stream")}
@@ -495,16 +623,136 @@ class OCRClient:
             self.logger.error("OCR server returned non-JSON response")
             return
 
+        self._handle_ocr_payload(image_path, payload)
+
+    def _handle_ocr_payload(self, image_path: Path, payload: Dict[str, Any]) -> None:
         if payload.get("status") != "ok":
             self.logger.error("OCR server error: %s", payload)
             return
 
-        text = payload.get("text", "").strip()
+        text = (payload.get("text") or "").strip()
+        refined_text = (payload.get("refined_text") or "").strip()
+        markdown = (payload.get("markdown") or "").strip()
+
         if text:
             self.logger.info("OCR result (%s): %s", image_path.name, text)
-            self.tts.speak(text)
         else:
             self.logger.warning("OCR result for %s contained no text.", image_path.name)
+
+        if refined_text:
+            self.logger.info("Gemini refined text (%s): %s", image_path.name, refined_text)
+            self.tts.speak(refined_text, output_name=image_path.stem)
+        else:
+            if markdown:
+                self.logger.info("Gemini markdown (%s): %s", image_path.name, markdown)
+            self.logger.warning("Skipping TTS for %s because Gemini refined text is unavailable.", image_path.name)
+
+    # --------------------------- pipeline queue helpers ---------------------
+
+    def _ensure_pipeline_connections(self) -> None:
+        if self._pipeline_request_queue and self._pipeline_result_queue:
+            return
+
+        class _RequestManager(BaseManager):
+            pass
+
+        class _ResultManager(BaseManager):
+            pass
+
+        _RequestManager.register("get_queue")
+        _ResultManager.register("out_queue")
+
+        req_manager = PipelineRequestManager(
+            address=(self.config.pipeline_host, self.config.pipeline_port),
+            authkey=self.config.pipeline_authkey.encode("utf-8"),
+        )
+        res_manager = PipelineResultManager(
+            address=(self.config.pipeline_out_host, self.config.pipeline_out_port),
+            authkey=self.config.pipeline_out_authkey.encode("utf-8"),
+        )
+
+        req_manager.connect()
+        res_manager.connect()
+
+        self._pipeline_request_manager = req_manager
+        self._pipeline_result_manager = res_manager
+        self._pipeline_request_queue = req_manager.get_queue()
+        self._pipeline_result_queue = res_manager.out_queue()
+
+    def _resolve_pipeline_path(self, path_str: str) -> Path:
+        path = Path(path_str)
+        if not path.is_absolute():
+            path = (self.config.pipeline_base_dir / path).resolve()
+        return path
+
+    def _process_via_pipeline(self, image_path: Path) -> Optional[Dict[str, Any]]:
+        try:
+            self._ensure_pipeline_connections()
+        except Exception as exc:
+            self.logger.debug("Pipeline unavailable: %s", exc)
+            return None
+
+        drop_dir = self.config.pipeline_drop_dir
+        drop_dir.mkdir(parents=True, exist_ok=True)
+
+        job_key = uuid.uuid4().hex
+        staged_path = drop_dir / f"{job_key}_{image_path.name}"
+        try:
+            shutil.copy2(image_path, staged_path)
+        except OSError as exc:
+            self.logger.error("Failed to stage %s for pipeline: %s", image_path, exc)
+            return None
+
+        try:
+            self._pipeline_request_queue.put(str(staged_path))
+        except Exception as exc:
+            self.logger.error("Failed to enqueue %s: %s", staged_path, exc)
+            staged_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+            return None
+
+        deadline = time.time() + float(self.config.pipeline_timeout)
+
+        try:
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError("Pipeline timed out waiting for result")
+                try:
+                    result_path = self._pipeline_result_queue.get(timeout=remaining)
+                except queue.Empty:
+                    raise TimeoutError("Pipeline timed out waiting for result")
+                except Exception as exc:
+                    self.logger.debug("Pipeline result queue error: %s", exc)
+                    self._pipeline_result_queue = None
+                    self._pipeline_result_manager = None
+                    self._ensure_pipeline_connections()
+                    continue
+
+                if isinstance(result_path, bytes):
+                    result_path = result_path.decode("utf-8", errors="ignore")
+
+                html_path = self._resolve_pipeline_path(result_path)
+                if html_path.stem == staged_path.stem:
+                    if not html_path.exists():
+                        raise RuntimeError(f"Pipeline output missing: {html_path}")
+                    html_content = html_path.read_text(encoding="utf-8")
+                    return {
+                        "status": "ok",
+                        "html": html_content,
+                        "text": _html_to_text(html_content),
+                        "markdown": None,
+                        "refined_text": None,
+                    }
+                # Not our job, ignore and keep waiting
+                continue
+        except TimeoutError as exc:
+            self.logger.error("Pipeline timeout for %s: %s", image_path, exc)
+        except Exception as exc:
+            self.logger.error("Pipeline processing failed for %s: %s", image_path, exc)
+        finally:
+            staged_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+
+        return None
 
 
 # -----------------------------------------------------------------------------

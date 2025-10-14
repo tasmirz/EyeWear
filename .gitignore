@@ -1,8 +1,6 @@
-.env
-.venv
-
-./bborc_server/.env
-./bborc_server/.env*.local
-./bborc_server/bbocr
-
 **/.DS_Store
+**/__pycache__
+.venv
+.env
+.env*.local
+keys
