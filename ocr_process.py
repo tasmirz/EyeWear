@@ -17,6 +17,10 @@ from dotenv import load_dotenv
 import pygame
 from common import IPC
 
+
+ipc = None
+shm= None
+
 # Load environment variables
 load_dotenv()
 
@@ -56,8 +60,6 @@ class OCRClient:
         self.playback_thread = None
         
         # IPC setup
-        self.ipc = IPC("ocr_process")
-        self.shm = SharedMemory(name="ocr_signal", create=False, size=4)
         signal.signal(signal.SIGUSR1, self.signal_handler)
         
     def load_keys(self):
@@ -144,7 +146,13 @@ class OCRClient:
         try:
             if self.camera is None:
                 self.camera = Picamera2()
-                config = self.camera.create_still_configuration()
+                config = self.camera.create_preview_configuration(
+                    main={"size": (1920, 1080)},  # Adjust resolution as needed
+                    controls={
+                        "AfMode": 2,  # Continuous autofocus
+                        "AfSpeed": 0   # Normal speed
+                    }
+                )
                 self.camera.configure(config)
                 self.camera.start()
                 time.sleep(2)  # Camera warmup
@@ -323,7 +331,7 @@ class OCRClient:
     
     def signal_handler(self, signum, frame):
         """Handle signals from shared memory"""
-        action_code = struct.unpack('i', self.shm.buf[:4])[0]
+        action_code = struct.unpack('i', shm.buf[:4])[0]
         print(f"Action code from shared memory: {action_code}")
         
         if action_code == 1:
@@ -342,14 +350,28 @@ class OCRClient:
     def run(self):
         """Main run loop"""
         print("OCR Client initialized. Waiting for signals...")
+        authenticate_success = self.authenticate()
         try:
             while True:
-                time.sleep(1)
+                signal.pause()  # Wait for signals
         except KeyboardInterrupt:
             print("\nShutting down...")
             self.stop()
-            self.shm.close()
 
 if __name__ == "__main__":
-    client = OCRClient()
-    client.run()
+    try:
+        ipc = IPC("ocr_process")
+        shm = SharedMemory(name="ocr_signal", create=True, size=4)
+
+        client = OCRClient()
+        client.run()
+    except Exception as e:
+        print(f"Fatal error: {e}")
+    finally:
+        try:
+            ipc.cleanup()
+            shm.unlink()
+            shm.close()
+
+        except:
+            pass

@@ -37,7 +37,7 @@ import struct
 from common import IPC
 
 ipc = None
-#ocr_shm = SharedMemory(name="ocr_signal", size=4)
+ocr_shm = SharedMemory(name="ocr_signal", size=4)
 call_shm = SharedMemory(name="call_signal", size=4)
 
 def set_ipc(ipc_instance):
@@ -80,7 +80,7 @@ def run_ocr_client():
     setMode("OCR")
     ocr_shm.buf[:4] = struct.pack('i', 1)  # signal OCR client
     # send signal to OCR client process
-    ipc.send_signal("ocr_client",signal.SIGUSR1)
+    ipc.send_signal("ocr_process",signal.SIGUSR1)
     print("Running OCR client...")
 
 def call_client():
@@ -102,18 +102,18 @@ def mute_unmute():
 
 def take_new_photo_and_ocr_client_to_queue():
     ocr_shm.buf[:4] = struct.pack('i', 3)  # signal take new photo and OCR
-    ipc.send_signal("ocr_client",signal.SIGUSR1)
+    ipc.send_signal("ocr_process",signal.SIGUSR1)
     print("Taking new photo and sending to OCR client queue...")
 
 def stop_ocr():
     ocr_shm.buf[:4] = struct.pack('i', 2)  # signal stop OCR
-    ipc.send_signal("ocr_client",signal.SIGUSR1)
+    ipc.send_signal("ocr_process",signal.SIGUSR1)
     print("Stopping OCR...")
     setMode("IDLE")
 
 def pause_ocr():
     ocr_shm.buf[:4] = struct.pack('i', 4)  # signal pause OCR
-    ipc.send_signal("ocr_client",signal.SIGUSR1)
+    ipc.send_signal("ocr_process",signal.SIGUSR1)
     print("Pausing OCR...")
 
 
@@ -166,6 +166,7 @@ def read_button_events(device):
                 if key_event.keystate == key_event.key_down:
                     print(event.code, 'pressed')
                     button = button_map.get(event.code, None)
+                    print(f"Button mapped to: {button}")
                     if button:
                         action = fn_mapping[mode_mapping[getMode()].get(button, None)]
                         if action:
@@ -177,6 +178,8 @@ def read_button_events(device):
                         print(f"Unmapped button code: {event.code}")
                         
     except KeyboardInterrupt:
+        shared_memory_cleanup()
+        exit(0) 
         print("\nStopped listening.")   
     # handle if device is disconnected.
     except OSError as e:
@@ -184,7 +187,7 @@ def read_button_events(device):
         find_bluetooth_device()
 
 def shared_memory_cleanup():
-    #ocr_shm.close()
+    ocr_shm.close()
     call_shm.close()
 
 if __name__ == "__main__":

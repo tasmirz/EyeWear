@@ -1,5 +1,4 @@
 call_server
-bbocr_server
 .pid
 queue
 .venv

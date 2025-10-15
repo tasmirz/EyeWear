@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import atexit
 import sys
 
 """
@@ -13,6 +14,11 @@ from earbud_input import (
     shared_memory_cleanup
 )
 from common import IPC
+
+def cleanup():
+    global ipc;
+    shared_memory_cleanup()
+    ipc.cleanup()
 def main():
     try:
         ipc = IPC("emulator")  # Create an IPC instance for the emulator
@@ -31,9 +37,10 @@ def main():
             else:
                 print("Invalid input. Please try again.")
     except KeyboardInterrupt:
-        shared_memory_cleanup()
-        ipc.cleanup()
-        print("\nExiting Earbud Emulator.")
         
+        print("\nExiting Earbud Emulator.")
+
+
 if __name__ == "__main__":
+    atexit.register(cleanup)
     main()
