@@ -27,6 +27,7 @@
       cursor: pointer;
       border-radius: 5px;
     }
+    .stats { margin-top: 10px; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -53,6 +54,10 @@
       </div>
     </div>
     
+    <div class="stats" id="videoStats">
+      Video stats: --
+    </div>
+    
     <div class="debug" id="debugLog">
       Debug log will appear here...
     </div>
@@ -62,10 +67,13 @@
     let ws = null;
     let peerConnection = null;
     let selectedPi = null;
+    let videoTrack = null;
+    let statsInterval = null;
     const debugLog = document.getElementById('debugLog');
     const statusDiv = document.getElementById('status');
     const clickOverlay = document.getElementById('clickOverlay');
     const remoteVideo = document.getElementById('remoteVideo');
+    const videoStats = document.getElementById('videoStats');
 
     function log(message) {
       const timestamp = new Date().toLocaleTimeString();
@@ -82,6 +90,19 @@
         statusDiv.className = 'status disconnected';
         statusDiv.textContent = `Status: Disconnected` + (message ? ` - ${message}` : '');
       }
+    }
+
+    function updateVideoStats() {
+      if (!videoTrack) return;
+      
+      const settings = videoTrack.getSettings ? videoTrack.getSettings() : {};
+      const constraints = videoTrack.getConstraints ? videoTrack.getConstraints() : {};
+      
+      let statsText = `Video: ${settings.width || '?'}x${settings.height || '?'}`;
+      if (settings.frameRate) statsText += ` @ ${settings.frameRate}fps`;
+      if (videoTrack.readyState) statsText += ` | State: ${videoTrack.readyState}`;
+      
+      videoStats.textContent = statsText;
     }
 
     function connectWebSocket() {
@@ -205,19 +226,13 @@
         await peerConnection.setRemoteDescription(offer);
         log("✓ Remote description set");
         
-        // Log the SDP to check codecs
-        log(`SDP offer preview: ${sdp.substring(0, 200)}...`);
-        
         const answer = await peerConnection.createAnswer();
+        
+        // Set better video bandwidth constraints
+        answer.sdp = answer.sdp.replace(/a=mid:video\r\n/g, 'a=mid:video\r\nb=AS:512\r\n');
+        
         await peerConnection.setLocalDescription(answer);
         log("✓ Local description set");
-        
-        // Log transceivers to debug
-        const transceivers = peerConnection.getTransceivers();
-        log(`Transceivers count: ${transceivers.length}`);
-        transceivers.forEach((transceiver, i) => {
-          log(`Transceiver ${i}: ${transceiver.currentDirection} - ${transceiver.receiver.track ? transceiver.receiver.track.kind : 'no track'}`);
-        });
         
         // Send answer back to Pi
         ws.send(JSON.stringify({ 
@@ -254,19 +269,22 @@
           { urls: "stun:stun.l.google.com:19302" },
           { urls: "stun:stun1.l.google.com:19302" }
         ],
-        // Force H.264 codec preference
-        sdpSemantics: 'unified-plan'
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require'
       });
 
       pc.onconnectionstatechange = () => {
         log(`Connection state: ${pc.connectionState}`);
         if (pc.connectionState === 'connected') {
-          updateStatus(true, "WebRTC connected - check video");
-          // Show click overlay for autoplay
-          clickOverlay.style.display = 'flex';
+          updateStatus(true, "WebRTC connected");
+          // Start stats monitoring
+          statsInterval = setInterval(updateVideoStats, 2000);
         } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
           updateStatus(false, "WebRTC disconnected");
-          clickOverlay.style.display = 'none';
+          if (statsInterval) {
+            clearInterval(statsInterval);
+            statsInterval = null;
+          }
         }
       };
 
@@ -276,20 +294,25 @@
 
       pc.oniceconnectionstatechange = () => {
         log(`ICE connection state: ${pc.iceConnectionState}`);
-        if (pc.iceConnectionState === 'connected') {
-          log("✓ ICE connected - video should work now");
-        }
-      };
-
-      pc.onicegatheringstatechange = () => {
-        log(`ICE gathering state: ${pc.iceGatheringState}`);
       };
 
       pc.ontrack = (event) => {
         log(`🎬 Received remote track: ${event.track.kind}`);
-        log(`Track id: ${event.track.id}, readyState: ${event.track.readyState}`);
-        log(`Streams received: ${event.streams.length}`);
+        videoTrack = event.track;
         
+        // Handle track events
+        event.track.onmute = () => {
+          log("🔇 Video track muted - this may indicate network issues");
+        };
+        
+        event.track.onunmute = () => {
+          log("🔊 Video track unmuted");
+        };
+        
+        event.track.onended = () => {
+          log("⏹️ Video track ended");
+        };
+
         if (event.streams && event.streams.length > 0) {
           log(`Attaching stream with ${event.streams[0].getTracks().length} tracks`);
           remoteVideo.srcObject = event.streams[0];
@@ -298,30 +321,24 @@
           const stream = new MediaStream([event.track]);
           remoteVideo.srcObject = stream;
         }
-        
-        // Set up track ended handler
-        event.track.onended = () => {
-          log("Video track ended");
-        };
-        
-        event.track.onmute = () => {
-          log("Video track muted");
-        };
-        
-        event.track.onunmute = () => {
-          log("Video track unmuted");
-        };
 
-        // Try to play the video
-        setTimeout(() => {
-          remoteVideo.play().then(() => {
-            log("✓ Video playback started automatically");
+        // Try to play with better error handling
+        const playVideo = async () => {
+          try {
+            remoteVideo.playsInline = true;
+            remoteVideo.muted = true; // Important for autoplay
+            await remoteVideo.play();
+            log("✓ Video playback started");
             clickOverlay.style.display = 'none';
-          }).catch(e => {
+            updateVideoStats();
+          } catch (e) {
             log(`⚠ Autoplay blocked: ${e}. Click the video to start.`);
             clickOverlay.style.display = 'flex';
-          });
-        }, 1000);
+          }
+        };
+
+        // Wait a bit for the track to stabilize
+        setTimeout(playVideo, 1000);
       };
 
       pc.onicecandidate = (event) => {
@@ -348,8 +365,15 @@
         peerConnection = null;
       }
       
+      if (statsInterval) {
+        clearInterval(statsInterval);
+        statsInterval = null;
+      }
+      
+      videoTrack = null;
       remoteVideo.srcObject = null;
       clickOverlay.style.display = 'none';
+      videoStats.textContent = "Video stats: --";
       
       document.getElementById('connectBtn').disabled = false;
       document.getElementById('disconnectBtn').disabled = true;

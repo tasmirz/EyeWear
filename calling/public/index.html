@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Operator Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 20px 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: #667eea;
+            font-size: 24px;
+        }
+
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ef4444;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.connected {
+            background: #22c55e;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .login-section {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            max-width: 400px;
+            margin: 100px auto;
+        }
+
+        .login-section h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #374151;
+            font-weight: 500;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e5e7eb;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+            width: 100%;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-1px);
+        }
+
+        .btn-success {
+            background: #22c55e;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #16a34a;
+        }
+
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .dashboard {
+            display: none;
+        }
+
+        .dashboard.active {
+            display: block;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .card h3 {
+            color: #374151;
+            margin-bottom: 15px;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .badge-info {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .badge-success {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .badge-warning {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .device-list, .queue-list {
+            list-style: none;
+        }
+
+        .device-item, .queue-item {
+            padding: 12px;
+            border: 2px solid #f3f4f6;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.3s;
+        }
+
+        .device-item:hover, .queue-item:hover {
+            border-color: #667eea;
+            background: #f9fafb;
+        }
+
+        .device-info, .queue-info {
+            flex: 1;
+        }
+
+        .device-name, .queue-device {
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: 4px;
+        }
+
+        .device-key, .queue-time {
+            font-size: 12px;
+            color: #6b7280;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #9ca3af;
+        }
+
+        .empty-state svg {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 10px;
+            opacity: 0.5;
+        }
+
+        .video-container {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: none;
+        }
+
+        .video-container.active {
+            display: block;
+        }
+
+        .video-wrapper {
+            position: relative;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            aspect-ratio: 16/9;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .video-controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            justify-content: center;
+        }
+
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+
+        .alert-error {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+        }
+
+        .alert-success {
+            background: #dcfce7;
+            color: #166534;
+            border: 1px solid #bbf7d0;
+        }
+
+        .alert-info {
+            background: #dbeafe;
+            color: #1e40af;
+            border: 1px solid #bfdbfe;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .call-info {
+            background: #f9fafb;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .call-info-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .call-info-item:last-child {
+            border-bottom: none;
+        }
+
+        .call-info-label {
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .call-info-value {
+            color: #374151;
+            font-weight: 600;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Login Section -->
+        <div id="loginSection" class="login-section">
+            <h2>🔐 Operator Login</h2>
+            <div id="loginAlert"></div>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" required autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn btn-primary">
+                    <span id="loginBtnText">Login</span>
+                </button>
+            </form>
+            <p style="margin-top: 20px; text-align: center; color: #6b7280; font-size: 12px;">
+                Default admin: admin / admin
+            </p>
+        </div>
+
+        <!-- Dashboard -->
+        <div id="dashboard" class="dashboard">
+            <!-- Header -->
+            <div class="header">
+                <h1>📹 WebRTC Operator Dashboard</h1>
+                <div class="user-info">
+                    <div class="status-indicator" id="statusIndicator"></div>
+                    <span id="usernameDisplay">Operator</span>
+                    <button class="btn btn-danger" onclick="logout()">Logout</button>
+                </div>
+            </div>
+
+            <!-- Stats -->
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-value" id="deviceCount">0</div>
+                    <div class="stat-label">Available Devices</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="queueCount">0</div>
+                    <div class="stat-label">Calls in Queue</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="callStatus">Idle</div>
+                    <div class="stat-label">Call Status</div>
+                </div>
+            </div>
+
+            <!-- Main Grid -->
+            <div class="grid">
+                <!-- Available Devices -->
+                <div class="card">
+                    <h3>
+                        📱 Available Devices
+                        <span class="badge badge-info" id="deviceBadge">0</span>
+                    </h3>
+                    <ul class="device-list" id="deviceList">
+                        <li class="empty-state">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                            </svg>
+                            <p>No devices online</p>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- Call Queue -->
+                <div class="card">
+                    <h3>
+                        📞 Call Queue
+                        <span class="badge badge-warning" id="queueBadge">0</span>
+                    </h3>
+                    <ul class="queue-list" id="queueList">
+                        <li class="empty-state">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path>
+                            </svg>
+                            <p>No pending calls</p>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Video Container -->
+            <div class="video-container" id="videoContainer">
+                <h3 style="margin-bottom: 15px; color: #374151;">🎥 Active Call</h3>
+                <div class="call-info" id="callInfo">
+                    <div class="call-info-item">
+                        <span class="call-info-label">Device ID:</span>
+                        <span class="call-info-value" id="callDeviceId">-</span>
+                    </div>
+                    <div class="call-info-item">
+                        <span class="call-info-label">Duration:</span>
+                        <span class="call-info-value" id="callDuration">00:00</span>
+                    </div>
+                    <div class="call-info-item">
+                        <span class="call-info-label">Connection:</span>
+                        <span class="call-info-value" id="connectionState">Connecting...</span>
+                    </div>
+                </div>
+                <div class="video-wrapper">
+                    <video id="remoteVideo" autoplay playsinline></video>
+                </div>
+                <div class="video-controls">
+                    <button class="btn btn-danger" onclick="endCall()">End Call</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global state
+        let ws = null;
+        let authToken = null;
+        let username = null;
+        let pc = null;
+        let currentPeerId = null;
+        let callStartTime = null;
+        let callDurationInterval = null;
+
+        const WS_URL = `ws://${window.location.host}`;
+        const API_URL = `http://${window.location.host}`;
+
+        if (localStorage.getItem('authToken')) {
+            authToken = localStorage.getItem('authToken');
+            username = localStorage.getItem('username');
+            showDashboard();
+            connectWebSocket();
+        }
+
+
+        // Login
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const usernameInput = document.getElementById('username').value;
+            const passwordInput = document.getElementById('password').value;
+            const loginBtn = document.getElementById('loginBtnText');
+            
+            loginBtn.innerHTML = '<span class="loading"></span> Logging in...';
+            
+            try {
+                const response = await fetch(`${API_URL}/api/operator/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: usernameInput,
+                        password: passwordInput
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    authToken = data.token;
+                    username = data.username;
+                    showDashboard();
+                    // save to localStorage/sessionStorage if needed
+                    localStorage.setItem('authToken', authToken);
+                    localStorage.setItem('username', username);
+                    connectWebSocket();
+                } else {
+                    showAlert('loginAlert', data.error || 'Login failed', 'error');
+                }
+            } catch (error) {
+                showAlert('loginAlert', 'Connection error. Please try again.', 'error');
+            } finally {
+                loginBtn.textContent = 'Login';
+            }
+        });
+
+        function showDashboard() {
+            document.getElementById('loginSection').style.display = 'none';
+            document.getElementById('dashboard').classList.add('active');
+            document.getElementById('usernameDisplay').textContent = username;
+        }
+
+        function logout() {
+            if (ws) ws.close();
+            if (pc) pc.close();
+            authToken = null;
+            username = null;
+            localStorage.removeItem('authToken');
+            localStorage.removeItem('username');
+            document.getElementById('loginSection').style.display = 'block';
+            document.getElementById('dashboard').classList.remove('active');
+            document.getElementById('username').value = '';
+            document.getElementById('password').value = '';
+        }
+
+        // WebSocket connection
+        function connectWebSocket() {
+            ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                document.getElementById('statusIndicator').classList.add('connected');
+                
+                // Authenticate
+                ws.send(JSON.stringify({
+                    type: 'authenticate',
+                    token: authToken
+                }));
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleMessage(data);
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                document.getElementById('statusIndicator').classList.remove('connected');
+                setTimeout(connectWebSocket, 3000);
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        async function handleMessage(data) {
+            console.log('Received:', data.type, data);
+            
+            switch(data.type) {
+                case 'authenticated':
+                    console.log('WebSocket authenticated');
+                    break;
+                    
+                case 'pi_list':
+                    updateDeviceList(data.pis);
+                    break;
+                    
+                case 'pi_available':
+                    addDevice(data.piId, data.publicKey);
+                    break;
+                    
+                case 'pi_disconnected':
+                    removeDevice(data.piId);
+                    break;
+                    
+                case 'queue_update':
+                    updateQueue(data.queue);
+                    break;
+                    
+                case 'offer':
+                    await handleOffer(data.sdp, data.from);
+                    break;
+                    
+                case 'answer':
+                    await handleAnswer(data.sdp);
+                    break;
+                    
+                case 'candidate':
+                    await handleCandidate(data.candidate);
+                    break;
+                    
+                case 'peer_disconnected':
+                    handlePeerDisconnected();
+                    break;
+                    
+                case 'error':
+                    console.error('Server error:', data.message);
+                    break;
+            }
+        }
+
+        function updateDeviceList(devices) {
+            const list = document.getElementById('deviceList');
+            list.innerHTML = '';
+            
+            if (devices.length === 0) {
+                list.innerHTML = `
+                    <li class="empty-state">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                        </svg>
+                        <p>No devices online</p>
+                    </li>
+                `;
+            } else {
+                devices.forEach(device => {
+                    addDevice(device.piId, device.publicKey);
+                });
+            }
+            
+            updateStats();
+        }
+
+        function addDevice(piId, publicKey) {
+            const list = document.getElementById('deviceList');
+            
+            // Remove empty state
+            const emptyState = list.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
+            
+            // Check if already exists
+            if (document.getElementById(`device-${piId}`)) return;
+            
+            const li = document.createElement('li');
+            li.className = 'device-item';
+            li.id = `device-${piId}`;
+            li.innerHTML = `
+                <div class="device-info">
+                    <div class="device-name">Device ${piId.slice(0, 8)}</div>
+                    <div class="device-key">${publicKey ? publicKey.slice(0, 20) + '...' : piId}</div>
+                </div>
+                <span class="badge badge-success">Online</span>
+            `;
+            list.appendChild(li);
+            updateStats();
+        }
+
+        function removeDevice(piId) {
+            const element = document.getElementById(`device-${piId}`);
+            if (element) element.remove();
+            
+            const list = document.getElementById('deviceList');
+            if (list.children.length === 0) {
+                list.innerHTML = `
+                    <li class="empty-state">
+                        <p>No devices online</p>
+                    </li>
+                `;
+            }
+            updateStats();
+        }
+
+        function updateQueue(queue) {
+            const list = document.getElementById('queueList');
+            list.innerHTML = '';
+            
+            if (queue.length === 0) {
+                list.innerHTML = `
+                    <li class="empty-state">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path>
+                        </svg>
+                        <p>No pending calls</p>
+                    </li>
+                `;
+            } else {
+                queue.forEach(call => {
+                    const li = document.createElement('li');
+                    li.className = 'queue-item';
+                    const timeAgo = getTimeAgo(call.timestamp);
+                    li.innerHTML = `
+                        <div class="queue-info">
+                            <div class="queue-device">Device ${call.piId.slice(0, 8)}</div>
+                            <div class="queue-time">${timeAgo}</div>
+                        </div>
+                        <button class="btn btn-success" onclick="takeCall('${call.piId}')">
+                            Accept
+                        </button>
+                    `;
+                    list.appendChild(li);
+                });
+            }
+            
+            updateStats();
+        }
+
+        function getTimeAgo(timestamp) {
+            const seconds = Math.floor((Date.now() - timestamp) / 1000);
+            if (seconds < 60) return `${seconds}s ago`;
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return `${minutes}m ago`;
+            const hours = Math.floor(minutes / 60);
+            return `${hours}h ago`;
+        }
+
+        function updateStats() {
+            const deviceCount = document.getElementById('deviceList').querySelectorAll('.device-item').length;
+            const queueCount = document.getElementById('queueList').querySelectorAll('.queue-item').length;
+            
+            document.getElementById('deviceCount').textContent = deviceCount;
+            document.getElementById('queueCount').textContent = queueCount;
+            document.getElementById('deviceBadge').textContent = deviceCount;
+            document.getElementById('queueBadge').textContent = queueCount;
+        }
+
+        async function takeCall(piId) {
+            currentPeerId = piId;
+            
+            // Send take_call message
+            ws.send(JSON.stringify({
+                type: 'take_call',
+                piId: piId
+            }));
+            
+            // Create peer connection
+            await createPeerConnection();
+            
+            // Show video container
+            document.getElementById('videoContainer').classList.add('active');
+            document.getElementById('callDeviceId').textContent = piId.slice(0, 8);
+            document.getElementById('callStatus').textContent = 'In Call';
+            
+            // Start call timer
+            callStartTime = Date.now();
+            callDurationInterval = setInterval(updateCallDuration, 1000);
+        }
+
+        async function createPeerConnection() {
+            const configuration = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            };
+            
+            pc = new RTCPeerConnection(configuration);
+            
+            pc.ontrack = (event) => {
+                console.log('Received remote track');
+                const video = document.getElementById('remoteVideo');
+                video.srcObject = event.streams[0];
+            };
+            
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    ws.send(JSON.stringify({
+                        type: 'candidate',
+                        candidate: {
+                            candidate: event.candidate.candidate,
+                            sdpMLineIndex: event.candidate.sdpMLineIndex
+                        },
+                        to: currentPeerId
+                    }));
+                }
+            };
+            
+            pc.onconnectionstatechange = () => {
+                console.log('Connection state:', pc.connectionState);
+                document.getElementById('connectionState').textContent = pc.connectionState;
+            };
+        }
+
+        async function handleOffer(sdp, from) {
+            if (!pc) {
+                await createPeerConnection();
+            }
+            
+            currentPeerId = from;
+            
+            await pc.setRemoteDescription(new RTCSessionDescription({
+                type: 'offer',
+                sdp: sdp
+            }));
+            
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            
+            ws.send(JSON.stringify({
+                type: 'answer',
+                sdp: answer.sdp,
+                to: from
+            }));
+        }
+
+        async function handleAnswer(sdp) {
+            if (pc) {
+                await pc.setRemoteDescription(new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: sdp
+                }));
+            }
+        }
+
+        async function handleCandidate(candidate) {
+            if (pc && candidate) {
+                await pc.addIceCandidate(new RTCIceCandidate({
+                    candidate: candidate.candidate,
+                    sdpMLineIndex: candidate.sdpMLineIndex
+                }));
+            }
+        }
+
+        function handlePeerDisconnected() {
+            endCall();
+        }
+
+        function endCall() {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            
+            if (callDurationInterval) {
+                clearInterval(callDurationInterval);
+                callDurationInterval = null;
+            }
+            
+            document.getElementById('videoContainer').classList.remove('active');
+            document.getElementById('remoteVideo').srcObject = null;
+            document.getElementById('callStatus').textContent = 'Idle';
+            currentPeerId = null;
+            callStartTime = null;
+        }
+
+        function updateCallDuration() {
+            if (!callStartTime) return;
+            
+            const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            document.getElementById('callDuration').textContent = 
+                `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        }
+
+        function showAlert(elementId, message, type) {
+            const alertDiv = document.getElementById(elementId);
+            alertDiv.innerHTML = `
+                <div class="alert alert-${type}">
+                    ${message}
+                </div>
+            `;
+            setTimeout(() => {
+                alertDiv.innerHTML = '';
+            }, 5000);
+        }
+    </script>
+</body>
+</html>

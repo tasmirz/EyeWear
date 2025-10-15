@@ -7,3 +7,5 @@ queue
 __pycache__
 docs
 gstreamer-rtc/node_modules
+gstreamer-proto/node_modules/
+calling/node_modules/

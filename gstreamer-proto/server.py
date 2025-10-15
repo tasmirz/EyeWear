@@ -42,6 +42,7 @@ class GStreamerWebRTC:
             webrtcbin name=webrtc stun-server={STUN_SERVER} bundle-policy=max-bundle
             
             libcamerasrc ! 
+            pulsesrc device=bluez_source.98_47_44_ED_BD_B5.handsfree_head_unit !
             video/x-raw,width=640,height=480,framerate=15/1 ! 
             v4l2h264enc extra-controls="controls,repeat_sequence_header=1" ! 
             video/x-h264,profile=baseline ! 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WebRTC Video Client - Better H.264 compatibility
+WebRTC Video Client - Optimized for stable video
 """
 
 import asyncio
@@ -30,29 +30,48 @@ class GStreamerWebRTCVideoOnly:
         self.offer_created = False
         
     def create_pipeline(self):
-        """Create camera pipeline with better H.264 compatibility"""
+        """Create optimized camera pipeline"""
         try:
-            # Improved pipeline with better H.264 compatibility
+            # Optimized pipeline for stable video
             pipeline_str = f"""
-                webrtcbin name=webrtc stun-server={STUN_SERVER} bundle-policy=max-bundle
-                libcamerasrc !
-                video/x-raw,width=1280,height=720,framerate=30/1 !
-                videoconvert !
-                x264enc speed-preset=ultrafast tune=zerolatency byte-stream=true threads=4 !
-                video/x-h264,profile=constrained-baseline,level=(string)3.1 !
-                h264parse config-interval=1 !
-                rtph264pay config-interval=1 pt=96 !
-                application/x-rtp,media=video,encoding-name=H264,payload=96 !
-                webrtc.
+                webrtcbin name=webrtc 
+                stun-server={STUN_SERVER} 
+                bundle-policy=max-bundle
+                latency=100
+                
+                libcamerasrc 
+                ! video/x-raw,width=640,height=480,framerate=30/1 
+                ! queue max-size-buffers=1 leaky=downstream 
+                ! videoconvert 
+                ! queue max-size-buffers=1 leaky=downstream
+                ! x264enc 
+                   speed-preset=ultrafast 
+                   tune=zerolatency 
+                   bitrate=512 
+                   key-int-max=30 
+                   byte-stream=true 
+                   threads=4
+                ! video/x-h264,profile=constrained-baseline,level=(string)3.1
+                ! queue max-size-buffers=1 leaky=downstream
+                ! h264parse config-interval=1
+                ! rtph264pay 
+                   config-interval=1 
+                   pt=96 
+                   mtu=1200
+                ! application/x-rtp,media=video,encoding-name=H264,payload=96
+                ! webrtc.
             """
             
-            print("Creating pipeline with improved H.264 settings...")
+            print("Creating optimized pipeline...")
             self.pipe = Gst.parse_launch(pipeline_str)
             self.webrtc = self.pipe.get_by_name('webrtc')
             
             if not self.webrtc:
                 print("ERROR: Could not find webrtcbin!")
                 return False
+            
+            # Configure webrtcbin for better performance
+            self.webrtc.set_property("bundle-policy", GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
             
             # Connect signals
             self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
@@ -63,31 +82,31 @@ class GStreamerWebRTCVideoOnly:
             bus.add_signal_watch()
             bus.connect('message', self.on_bus_message)
             
-            print("✓ Pipeline created successfully!")
+            print("✓ Optimized pipeline created successfully!")
             return True
             
         except Exception as e:
-            print(f"Error creating pipeline: {e}")
+            print(f"Error creating optimized pipeline: {e}")
             # Fallback to simpler pipeline
-            return self.create_fallback_pipeline()
+            return self.create_simple_pipeline()
     
-    def create_fallback_pipeline(self):
-        """Fallback pipeline with test pattern"""
+    def create_simple_pipeline(self):
+        """Simple fallback pipeline"""
         try:
             pipeline_str = f"""
-                webrtcbin name=webrtc stun-server={STUN_SERVER} bundle-policy=max-bundle
-                videotestsrc pattern=ball is-live=true !
-                video/x-raw,width=640,height=480,framerate=15/1 !
-                videoconvert !
-                x264enc speed-preset=ultrafast tune=zerolatency !
-                video/x-h264,profile=baseline !
-                h264parse !
-                rtph264pay config-interval=1 pt=96 !
-                application/x-rtp,media=video,encoding-name=H264,payload=96 !
-                webrtc.
+                webrtcbin name=webrtc stun-server={STUN_SERVER}
+                videotestsrc pattern=ball is-live=true 
+                ! video/x-raw,width=640,height=480,framerate=15/1 
+                ! videoconvert 
+                ! x264enc speed-preset=ultrafast tune=zerolatency 
+                ! video/x-h264,profile=baseline 
+                ! h264parse 
+                ! rtph264pay config-interval=1 pt=96 
+                ! application/x-rtp,media=video,encoding-name=H264,payload=96 
+                ! webrtc.
             """
             
-            print("Creating fallback pipeline with test pattern...")
+            print("Creating simple fallback pipeline...")
             self.pipe = Gst.parse_launch(pipeline_str)
             self.webrtc = self.pipe.get_by_name('webrtc')
             
@@ -99,15 +118,15 @@ class GStreamerWebRTCVideoOnly:
             bus.add_signal_watch()
             bus.connect('message', self.on_bus_message)
             
-            print("✓ Fallback pipeline created successfully!")
+            print("✓ Simple pipeline created successfully!")
             return True
             
         except Exception as e:
-            print(f"Error creating fallback pipeline: {e}")
+            print(f"Error creating simple pipeline: {e}")
             return False
     
     async def force_create_offer(self):
-        """Force create and send an offer using asyncio"""
+        """Force create and send an offer"""
         if self.offer_created:
             print("Offer already created, skipping...")
             return
@@ -223,6 +242,9 @@ class GStreamerWebRTCVideoOnly:
                     
         elif t == Gst.MessageType.STREAM_START:
             print("🎬 Stream started!")
+        elif t == Gst.MessageType.QOS:
+            # Handle quality of service messages
+            pass
                 
     async def delayed_offer_creation(self):
         """Create offer after a delay using asyncio"""

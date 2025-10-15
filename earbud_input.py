@@ -37,8 +37,12 @@ import struct
 from common import IPC
 
 ipc = None
-ocr_shm = SharedMemory(name="ocr_signal", size=4)
+#ocr_shm = SharedMemory(name="ocr_signal", size=4)
+call_shm = SharedMemory(name="call_signal", size=4)
 
+def set_ipc(ipc_instance):
+    global ipc
+    ipc = ipc_instance
 
 button_map = {
     200: "DOUBLE_TAP",   # playcd
@@ -81,13 +85,19 @@ def run_ocr_client():
 
 def call_client():
     setMode("CALL")
+    call_shm.buf[:4] = struct.pack('i', 1)  # signal call client
+    ipc.send_signal("call_client",signal.SIGUSR1)
     print("Calling client...")
 
 def hangup():
     print("Hanging up call...")
+    call_shm.buf[:4] = struct.pack('i', 2)  # signal hangup
+    ipc.send_signal("call_client",signal.SIGUSR1)
     setMode("IDLE")
 
 def mute_unmute():
+    call_shm.buf[:4] = struct.pack('i', 3)  # signal mute/unmute
+    ipc.send_signal("call_client",signal.SIGUSR1)
     print("Toggling mute/unmute...")
 
 def take_new_photo_and_ocr_client_to_queue():
@@ -173,7 +183,9 @@ def read_button_events(device):
         print(f"\nDevice disconnected: {e}")
         find_bluetooth_device()
 
-
+def shared_memory_cleanup():
+    #ocr_shm.close()
+    call_shm.close()
 
 if __name__ == "__main__":
     try:
@@ -188,6 +200,5 @@ if __name__ == "__main__":
         print(f"Error: {e}")
         sys.exit(1)
     finally:
-        ocr_shm.close()
-        ocr_shm.unlink()
+        shared_memory_cleanup()
         ipc.cleanup()

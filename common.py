@@ -14,7 +14,7 @@ class IPC:
     pid_file_location = "/tmp/.pid/"
     def __init__(self, filename):
         self.filename = filename
-        self.pidfile = f".pid/{self.filename}.pid"
+        self.pidfile = f"{self.pid_file_location}/{self.filename}.pid"
         if not os.path.exists(self.pidfile):
             self.create_pidfile(self.filename)
         else:
