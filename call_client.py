@@ -24,30 +24,25 @@ from common import IPC
 SIGNALING_SERVER = "ws://192.168.3.105:8081"
 API_SERVER = "http://192.168.3.105:8081"
 STUN_SERVER = "stun://stun.l.google.com:19302"
-  # Replace with actual public key
 
-ipc=None
+ipc = None
 
 # Shared memory for IPC
 SHM_SIZE = 4
 SHM_NAME = "call_signal"
 
-shm=None
+shm = None
 
-# read pem fron keys/device_public.pem
+# read pem from keys/device_public.pem
 with open("keys/device_public.pem", "r") as f:
     PUBLIC_KEY = f.read().strip()
     # Remove header/footer if present
     if PUBLIC_KEY.startswith("-----BEGIN PUBLIC KEY-----"):
         PUBLIC_KEY = "\n".join(PUBLIC_KEY.split("\n")[1:-1]).strip()
     
-# read pem fron keys/device_private.pem
+# read pem from keys/device_private.pem
 with open("keys/device_private.pem", "r") as f:
     PRIVATE_KEY = f.read().strip()
-
-# Shared memory for IPC
-SHM_NAME = "call_signal"
-SHM_SIZE = 4
 
 # Action codes
 ACTION_REQUEST_CALL = 1
@@ -68,6 +63,7 @@ class WebRTCClient:
         self.auth_token = None
         self.in_call = False
         self.muted = False
+        self.pipeline_playing = False
         
         # Shared memory
         self.setup_shared_memory()
@@ -149,8 +145,8 @@ class WebRTCClient:
             print(f"✅ Received challenge")
             print(f"   Token: {challenge_token}")
             print(f"   Text: {challenge_text}")
-            # Step 2: Sign challenge (in production, use private key)
-            # For now, we'll simulate signing
+            
+            # Step 2: Sign challenge
             signed_challenge = self.sign_challenge(challenge_text)
             
             # Step 3: Verify signature and get final token
@@ -178,12 +174,12 @@ class WebRTCClient:
             return False
             
     def sign_challenge(self, challenge_text):
-        """Sign the challenge text (implement with actual private key in production)"""
-        # use private key to sign challenge_text
+        """Sign the challenge text with private key"""
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.backends import default_backend
+        
         private_key = serialization.load_pem_private_key(
             PRIVATE_KEY.encode(),
             password=None,
@@ -196,9 +192,72 @@ class WebRTCClient:
         )
         return base64.b64encode(signature).decode()
 
+    async def stop_call(self):
+        """Stop current call and reset for next call"""
+        if not self.in_call:
+            return
+            
+        print("📴 Stopping call...")
+        self.in_call = False
+        self.peer_id = None
+        self.offer_created = False
+        
+        # Properly stop and reset pipeline
+        if self.pipe and self.pipeline_playing:
+            print("🛑 Stopping pipeline...")
+            self.pipe.set_state(Gst.State.NULL)
+            self.pipeline_playing = False
+            await asyncio.sleep(1)  # Allow time for pipeline to fully stop
+            
+        # Recreate the pipeline for next call
+        if self.pipe:
+            print("🔄 Cleaning up old pipeline...")
+            self.cleanup_pipeline()
+            
+        # Create fresh pipeline for next call
+        print("🔄 Creating fresh pipeline for next call...")
+        if not self.create_pipeline():
+            print("❌ Failed to recreate pipeline")
+            return False
+            
+        if self.ws and self.connected:
+            try:
+                await self.ws.send(json.dumps({
+                    'type': 'call_ended'
+                }))
+                print("✅ Call ended notification sent")
+            except Exception as e:
+                print(f"⚠️ Error sending call_ended: {e}")
+                
+        return True
+        
+    def cleanup_pipeline(self):
+        """Clean up pipeline resources"""
+        if self.pipe:
+            # Remove signal handlers first
+            if self.webrtc:
+                try:
+                    self.webrtc.disconnect_by_func(self.on_negotiation_needed)
+                    self.webrtc.disconnect_by_func(self.on_ice_candidate)
+                except:
+                    pass
+                    
+            # Remove bus watch
+            bus = self.pipe.get_bus()
+            bus.remove_signal_watch()
+            
+            # Set state to NULL
+            self.pipe.set_state(Gst.State.NULL)
+            self.pipe = None
+            self.webrtc = None
+            
     def create_pipeline(self):
-        """Create optimized camera pipeline"""
+        """Create optimized camera pipeline - called fresh for each call"""
         try:
+            # Clean up any existing pipeline first
+            if self.pipe:
+                self.cleanup_pipeline()
+                
             pipeline_str = f"""
                 webrtcbin name=webrtc 
                 stun-server={STUN_SERVER} 
@@ -228,26 +287,31 @@ class WebRTCClient:
                 ! webrtc.
             """
             
-            print("Creating optimized pipeline...")
+            print("🔄 Creating fresh pipeline...")
             self.pipe = Gst.parse_launch(pipeline_str)
             self.webrtc = self.pipe.get_by_name('webrtc')
             
             if not self.webrtc:
                 return self.create_fallback_pipeline()
             
+            # Set WebRTC properties
             self.webrtc.set_property("bundle-policy", GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
+            
+            # Connect signals - IMPORTANT: Do this fresh each time
             self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
             self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
             
+            # Setup bus monitoring
             bus = self.pipe.get_bus()
             bus.add_signal_watch()
             bus.connect('message', self.on_bus_message)
             
-            print("✓ Pipeline created successfully!")
+            print("✅ Fresh pipeline created successfully!")
             return True
             
         except Exception as e:
-            print(f"Error creating pipeline: {e}")
+            print(f"❌ Error creating pipeline: {e}")
+            traceback.print_exc()
             return self.create_fallback_pipeline()
     
     def create_fallback_pipeline(self):
@@ -298,63 +362,51 @@ class WebRTCClient:
             
         except Exception as e:
             print(f"❌ Error requesting call: {e}")
-            
-    async def stop_call(self):
-        """Stop current call"""
-        if not self.in_call:
-            return
-            
-        print("📴 Stopping call...")
-        self.in_call = False
-        
-        if self.pipe:
-            self.pipe.set_state(Gst.State.NULL)
-            
-        self.peer_id = None
-        self.offer_created = False
-        
-        if self.ws and self.connected:
-            try:
-                await self.ws.send(json.dumps({
-                    'type': 'call_ended'
-                }))
-            except:
-                pass
-                
+                    
     async def toggle_mute(self):
         """Toggle mute state"""
         self.muted = not self.muted
         print(f"🔇 Audio {'MUTED' if self.muted else 'UNMUTED'}")
         
-        # In a real implementation, you would control the audio pipeline here
-        # For video-only, this is a placeholder
-        
     async def force_create_offer(self):
         """Force create and send an offer"""
-        if self.offer_created:
-            print("Offer already created, skipping...")
+        if self.offer_created or not self.in_call:
+            print("⚠️ Offer already created or not in call, skipping...")
             return
             
         print("🚀 Creating WebRTC offer...")
         self.offer_created = True
         
-        promise = Gst.Promise.new_with_change_func(self.on_offer_created, self.webrtc, None)
-        self.webrtc.emit('create-offer', None, promise)
+        try:
+            promise = Gst.Promise.new_with_change_func(self.on_offer_created, self.webrtc, None)
+            self.webrtc.emit('create-offer', None, promise)
+        except Exception as e:
+            print(f"❌ Error creating offer: {e}")
+            self.offer_created = False
         
     def on_negotiation_needed(self, element):
         """Called when negotiation is needed"""
         print("🎯 Negotiation needed")
-        if self.loop and not self.offer_created:
+        if self.loop and not self.offer_created and self.in_call:
             asyncio.run_coroutine_threadsafe(self.force_create_offer(), self.loop)
         
     def on_offer_created(self, promise, element, _):
         """Handle created offer"""
         try:
+            if not self.in_call:
+                print("⚠️ Not in call, ignoring offer creation")
+                return
+                
             reply = promise.get_reply()
+            if not reply:
+                print("❌ No reply from offer creation")
+                self.offer_created = False
+                return
+                
             offer = reply.get_value('offer')
-            
             if not offer:
-                print("ERROR: No offer in reply!")
+                print("❌ No offer in reply!")
+                self.offer_created = False
                 return
             
             sdp_text = offer.sdp.as_text()
@@ -363,12 +415,13 @@ class WebRTCClient:
             element.emit('set-local-description', offer, promise)
             promise.interrupt()
             
-            if self.loop and self.connected and self.peer_id:
+            if self.loop and self.connected and self.peer_id and self.in_call:
                 asyncio.run_coroutine_threadsafe(self.send_sdp_offer(sdp_text), self.loop)
                 
         except Exception as e:
             print(f"❌ Error in on_offer_created: {e}")
             traceback.print_exc()
+            self.offer_created = False
         
     async def send_sdp_offer(self, sdp):
         """Send SDP offer to signaling server"""
@@ -386,7 +439,7 @@ class WebRTCClient:
         
     def on_ice_candidate(self, element, mline_index, candidate):
         """Handle ICE candidates"""
-        if self.loop and self.connected and self.peer_id:
+        if self.loop and self.connected and self.peer_id and self.in_call:
             asyncio.run_coroutine_threadsafe(
                 self.send_ice_candidate(mline_index, candidate), 
                 self.loop
@@ -412,24 +465,35 @@ class WebRTCClient:
         """Handle GStreamer bus messages"""
         t = message.type
         if t == Gst.MessageType.EOS:
-            print("End-of-stream")
+            print("📺 End-of-stream")
+            if self.loop and self.in_call:
+                asyncio.run_coroutine_threadsafe(self.stop_call(), self.loop)
+                
         elif t == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            print(f"❌ ERROR: {err}")
+            print(f"❌ Pipeline ERROR: {err}")
             if debug:
                 print(f"Debug: {debug}")
+            if self.loop and self.in_call:
+                asyncio.run_coroutine_threadsafe(self.stop_call(), self.loop)
+                
         elif t == Gst.MessageType.WARNING:
             warn, debug = message.parse_warning()
-            print(f"⚠ WARNING: {warn}")
+            print(f"⚠ Pipeline WARNING: {warn}")
+            
         elif t == Gst.MessageType.STATE_CHANGED:
             if message.src == self.pipe:
                 old, new, pending = message.parse_state_changed()
                 print(f"🔧 Pipeline: {old.value_nick} → {new.value_nick}")
                 
-                if new == Gst.State.PLAYING and self.peer_id and not self.offer_created:
-                    print("🎬 Pipeline PLAYING - forcing offer in 2 seconds...")
-                    if self.loop:
-                        asyncio.run_coroutine_threadsafe(self.delayed_offer_creation(), self.loop)
+                if new == Gst.State.PLAYING:
+                    self.pipeline_playing = True
+                    if self.peer_id and not self.offer_created and self.in_call:
+                        print("🎬 Pipeline PLAYING - forcing offer in 2 seconds...")
+                        if self.loop:
+                            asyncio.run_coroutine_threadsafe(self.delayed_offer_creation(), self.loop)
+                elif new == Gst.State.NULL:
+                    self.pipeline_playing = False
                     
         elif t == Gst.MessageType.STREAM_START:
             print("🎬 Stream started!")
@@ -437,7 +501,8 @@ class WebRTCClient:
     async def delayed_offer_creation(self):
         """Create offer after delay"""
         await asyncio.sleep(2)
-        await self.force_create_offer()
+        if self.in_call and not self.offer_created:
+            await self.force_create_offer()
     
     async def handle_answer(self, sdp_text):
         """Handle SDP answer from operator"""
@@ -471,6 +536,29 @@ class WebRTCClient:
                 self.webrtc.emit('add-ice-candidate', mline_index, candidate)
         except Exception as e:
             print(f"❌ Error handling ICE candidate: {e}")
+            
+    async def handle_call_accepted(self, operator_id):
+        """Handle call acceptance - start fresh pipeline"""
+        print(f"\n📞 CALL ACCEPTED by operator: {operator_id}")
+        self.peer_id = operator_id
+        self.in_call = True
+        
+        # Make sure we have a fresh pipeline
+        if not self.pipe:
+            print("🔄 Creating pipeline for accepted call...")
+            if not self.create_pipeline():
+                print("❌ Failed to create pipeline for call")
+                return
+                
+        # Start pipeline
+        print("🎬 Starting video stream...")
+        result = self.pipe.set_state(Gst.State.PLAYING)
+        if result == Gst.StateChangeReturn.FAILURE:
+            print("❌ Failed to start pipeline!")
+            await self.stop_call()
+        else:
+            print("✅ Pipeline started successfully")
+            self.pipeline_playing = True
             
     async def connect_signaling(self):
         """Connect to signaling server"""
@@ -515,26 +603,20 @@ class WebRTCClient:
                         
                     elif msg_type == 'call_accepted':
                         operator_id = data.get('operatorId')
-                        print(f"\n📞 CALL ACCEPTED by operator: {operator_id}")
-                        self.peer_id = operator_id
-                        self.in_call = True
+                        await self.handle_call_accepted(operator_id)
                         
-                        # Start pipeline
-                        print("🎬 Starting video stream...")
-                        result = self.pipe.set_state(Gst.State.PLAYING)
-                        if result == Gst.StateChangeReturn.FAILURE:
-                            print("❌ Failed to start pipeline!")
-                        else:
-                            print("✅ Pipeline started")
-                            await asyncio.sleep(3)
-                            await self.force_create_offer()
-                            
                     elif msg_type == 'answer':
-                        await self.handle_answer(data['sdp'])
+                        if self.in_call:
+                            await self.handle_answer(data['sdp'])
+                        else:
+                            print("⚠️ Received answer but not in call")
                         
                     elif msg_type == 'candidate':
-                        await self.handle_ice_candidate(data.get('candidate'))
-                        
+                        if self.in_call and self.webrtc:
+                            await self.handle_ice_candidate(data.get('candidate'))
+                        else:
+                            print("⚠️ Received ICE candidate but not in call")
+                            
                     elif msg_type == 'peer_disconnected':
                         print("\n📴 Operator disconnected")
                         await self.stop_call()
@@ -565,7 +647,7 @@ class WebRTCClient:
                 print("❌ Authentication failed - exiting")
                 return
             
-            # Create pipeline
+            # Create initial pipeline
             if not self.create_pipeline():
                 print("❌ Failed to create pipeline")
                 return
@@ -594,26 +676,26 @@ class WebRTCClient:
             self.cleanup()
             
     def cleanup(self):
-        """Clean up resources"""
+        """Clean up all resources"""
         print("🧹 Cleaning up...")
         self.connected = False
         self.in_call = False
+        self.offer_created = False
+        self.peer_id = None
         
-        if self.pipe:
-            self.pipe.set_state(Gst.State.NULL)
+        # Clean up pipeline
+        self.cleanup_pipeline()
             
         if self.ws:
             asyncio.create_task(self.ws.close())
             
-                
         print("✅ Cleanup complete")
 
 
 async def main():
     import os
+    global ipc
     ipc = IPC("call_client")
-    # Initialize GStreamer
-    Gst.init(None)
     
     # Print process ID for signal sending
     print(f"Process ID: {os.getpid()}")
@@ -629,8 +711,9 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 Exiting...")
-        shm.unlink()
-        shm.close()
+        if shm:
+            shm.unlink()
+            shm.close()
         if ipc:
             ipc.cleanup()
         sys.exit(0)
