@@ -15,8 +15,9 @@ from cryptography.hazmat.backends import default_backend
 from picamera2 import Picamera2
 from dotenv import load_dotenv
 import pygame
+import subprocess
 from common import IPC
-
+from gtts import gTTS
 
 ipc = None
 shm= None
@@ -143,26 +144,19 @@ class OCRClient:
     
     def capture_image(self):
         """Capture image using picamera2 and enqueue"""
-        try:
-            if self.camera is None:
-                self.camera = Picamera2()
-                config = self.camera.create_preview_configuration(
-                    main={"size": (1920, 1080)},  # Adjust resolution as needed
-                    controls={
-                        "AfMode": 2,  # Continuous autofocus
-                        "AfSpeed": 0   # Normal speed
-                    }
-                )
-                self.camera.configure(config)
-                self.camera.start()
-                time.sleep(2)  # Camera warmup
-            
             # Generate filename
+        try:
+
+            print("Capturing image...")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = self.image_dir / f"image_{timestamp}.jpg"
-            
+            filename = self.image_dir / f"_image_{timestamp}.jpg"
+        
+            #run command,
+            filename =  f"/home/pi/EyeWear/captured_images/image_{timestamp}.jpg"
+            subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-on-capture', '--timeout', '2000', '--nopreview', '--verbose', '0'])
+            #subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-mode','continuous', '--timeout', '2000', '--nopreview', '--verbose', '0'])
+            #wait for subprocess to complete
             # Capture image
-            self.camera.capture_file(str(filename))
             print(f"Captured image: {filename}")
             
             # Enqueue image path
@@ -173,6 +167,7 @@ class OCRClient:
     
     def upload_worker(self):
         """Worker thread to upload images continuously"""
+        print("Upload worker started")
         while self.running:
             try:
                 # Get image from queue (non-blocking with timeout)
@@ -191,35 +186,99 @@ class OCRClient:
                         self.image_queue.put(image_path)
                         time.sleep(5)
                         continue
-                
+
                 # Upload image
                 with open(image_path, 'rb') as f:
                     files = {'image': f}
                     headers = {'Authorization': f'Bearer {self.jwt_token}'}
-                    
+
                     response = requests.post(
                         f"{self.server_url}/upload",
                         files=files,
                         headers=headers,
                         timeout=30
                     )
-                    response.raise_for_status()
-                
-                # Get audio file from response
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                audio_filename = self.audio_dir / f"audio_{timestamp}.wav"
-                
-                with open(audio_filename, 'wb') as f:
-                    f.write(response.content)
-                
-                print(f"Received audio file: {audio_filename}")
-                
-                # Delete image
-                os.remove(image_path)
-                print(f"Deleted image: {image_path}")
-                
-                # Enqueue audio file
-                self.audio_queue.put(str(audio_filename))
+
+                # Handle response
+                # If server returns JSON with uuid (202 Accepted), poll /result/<uuid>
+                content_type = response.headers.get('Content-Type', '')
+                audio_filename = None
+
+                if 'application/json' in content_type or response.status_code == 202:
+                    try:
+                        data = response.json()
+                    except Exception:
+                        # Not a JSON body; treat as error
+                        raise requests.exceptions.RequestException('Unexpected non-JSON response')
+
+                    req_uuid = data.get('uuid')
+                    if not req_uuid:
+                        raise requests.exceptions.RequestException('No uuid in upload response')
+
+                    # Poll for result
+                    poll_url = f"{self.server_url}/result/{req_uuid}"
+                    max_wait = 120  # seconds
+                    wait_interval = 10
+                    elapsed = 0.0
+                    got_audio = False
+
+                    while elapsed < max_wait and self.running:
+                        try:
+                            poll_resp = requests.get(poll_url, headers=headers, timeout=30, stream=True)
+                        except requests.exceptions.RequestException as e:
+                            print(f"Polling error: {e}")
+                            time.sleep(1)
+                            elapsed += 1
+                            continue
+
+                        if poll_resp.status_code == 202:
+                            # still pending
+                            time.sleep(wait_interval)
+                            elapsed += wait_interval
+                            continue
+                        elif poll_resp.status_code == 200:
+                            # Received plain text response
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            audio_filename = self.audio_dir / f"audio_{timestamp}.mp3"
+                            print(poll_resp)
+                            print(poll_resp.json())
+                            print(poll_resp.json()["text"])
+
+                            tts = gTTS(text=poll_resp.json()["text"], lang='bn')
+                            tts.save(audio_filename)
+
+                            got_audio = True
+                            print(f"Received plain text file: {audio_filename}")
+                            break
+                        elif poll_resp.status_code == 404:
+                            print(f"Result not found for uuid {req_uuid}")
+                            break
+                        elif poll_resp.status_code == 401:
+                            # JWT expired or invalid: re-auth and retry upload
+                            print("Unauthorized when polling, re-authenticating")
+                            self.jwt_token = None
+                            break
+                        else:
+                            print(f"Unexpected poll response {poll_resp.status_code}: {poll_resp.text}")
+                            break
+
+                    if not got_audio:
+                        # Put image back in queue for retry or drop
+                        print(f"Failed to get audio for uuid {req_uuid} within timeout")
+                        self.image_queue.put(image_path)
+                        time.sleep(1)
+                        continue
+                #
+                # If we reached here and have an audio file, delete the image and enqueue audio
+                if audio_filename and os.path.exists(audio_filename):
+                    try:
+                        os.remove(image_path)
+                        print(f"Deleted image: {image_path}")
+                    except Exception as e:
+                        print(f"Failed to delete image {image_path}: {e}")
+
+                    # Enqueue audio file
+                    self.audio_queue.put(str(audio_filename))
                 
             except requests.exceptions.RequestException as e:
                 print(f"Upload failed: {e}")
@@ -282,20 +341,9 @@ class OCRClient:
         print("Starting OCR Client...")
         
         # Authenticate
-        if not self.authenticate():
-            print("Failed to authenticate. Exiting.")
-            return
-        
-        self.running = True
-        
-        # Start worker threads
-        self.upload_thread = threading.Thread(target=self.upload_worker, daemon=True)
-        self.playback_thread = threading.Thread(target=self.playback_worker, daemon=True)
-        
-        self.upload_thread.start()
-        self.playback_thread.start()
         
         print("OCR Client started successfully")
+        self.capture_image()  # Capture initial image
     
     def stop(self):
         """Stop the OCR client"""
@@ -350,7 +398,18 @@ class OCRClient:
     def run(self):
         """Main run loop"""
         print("OCR Client initialized. Waiting for signals...")
-        authenticate_success = self.authenticate()
+        if not self.authenticate():
+            print("Failed to authenticate. Exiting.")
+            return
+        
+        self.running = True
+        
+        # Start worker threads
+        self.upload_thread = threading.Thread(target=self.upload_worker, daemon=True)
+        self.playback_thread = threading.Thread(target=self.playback_worker, daemon=True)
+        
+        self.upload_thread.start()
+        self.playback_thread.start()
         try:
             while True:
                 signal.pause()  # Wait for signals
@@ -362,7 +421,7 @@ if __name__ == "__main__":
     try:
         ipc = IPC("ocr_process")
         shm = SharedMemory(name="ocr_signal", create=True, size=4)
-
+        print("Shared memory created")
         client = OCRClient()
         client.run()
     except Exception as e:

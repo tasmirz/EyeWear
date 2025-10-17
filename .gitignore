@@ -8,3 +8,4 @@ queue/*
 .env*.local
 keys
 **/node_modules
+bbocr_server/models/

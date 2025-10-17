@@ -16,5 +16,6 @@ echo "sync/" >> "$EXCLUDE_FILE"
 # Run rsync with excludes
 rsync -av --exclude-from="$EXCLUDE_FILE" "$PROJECT_DIR"/ "$DEST"
 
+
 # Clean up
 rm "$EXCLUDE_FILE"

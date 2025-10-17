@@ -1,0 +1,9 @@
+**/.DS_Store
+**/__pycache__
+**/*.pyc
+*.pkl
+save/html/**
+keys
+.env
+
+models

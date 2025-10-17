@@ -8,3 +8,7 @@ docs
 gstreamer-rtc/node_modules
 gstreamer-proto/node_modules/
 calling/node_modules/
+**/node_modules/
+**/.env
+**/.venv
+bbocr_server/save/

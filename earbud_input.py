@@ -37,13 +37,15 @@ import struct
 from common import IPC
 
 ipc = None
-ocr_shm = SharedMemory(name="ocr_signal", size=4)
-call_shm = SharedMemory(name="call_signal", size=4)
+#ocr_shm = SharedMemory(name="ocr_signal", create=False, size=4)
+call_shm = SharedMemory(name="call_signal", create=False, size=4)
 
 def set_ipc(ipc_instance):
     global ipc
     ipc = ipc_instance
-
+def get_ipc():
+    global ipc
+    return ipc
 button_map = {
     200: "DOUBLE_TAP",   # playcd
     201: "DOUBLE_TAP",   # pausecd
@@ -152,7 +154,6 @@ def find_bluetooth_device():
                     return device
         print("No Bluetooth input device found. Retrying in 10 seconds...")
         time.sleep(10)
-    return None
     
 def read_button_events(device):
     """Read and process button events"""
@@ -176,18 +177,16 @@ def read_button_events(device):
                                 action()
                     else:
                         print(f"Unmapped button code: {event.code}")
-                        
-    except KeyboardInterrupt:
-        shared_memory_cleanup()
-        exit(0) 
-        print("\nStopped listening.")   
     # handle if device is disconnected.
     except OSError as e:
         print(f"\nDevice disconnected: {e}")
         find_bluetooth_device()
 
 def shared_memory_cleanup():
-    ocr_shm.close()
+    global ocr_shm, call_shm
+    print("Cleaning up shared memory...")
+    #ocr_shm.close()
+    #self.create_pipeline_rpicamocr_shm.close()
     call_shm.close()
 
 if __name__ == "__main__":
@@ -198,10 +197,12 @@ if __name__ == "__main__":
             read_button_events(device)
         else:
             print("No Bluetooth input device found. Exiting.")
+            shared_memory_cleanup()
             sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nExiting Earbud Input Listener.")
     except Exception as e:
         print(f"Error: {e}")
-        sys.exit(1)
     finally:
         shared_memory_cleanup()
         ipc.cleanup()

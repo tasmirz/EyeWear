@@ -3,6 +3,7 @@
 WebRTC Video Client with Authentication and Shared Memory IPC
 """
 
+import os
 import asyncio
 import base64
 import json
@@ -20,10 +21,13 @@ from multiprocessing.shared_memory import SharedMemory
 import traceback
 from common import IPC
 
+from dotenv import load_dotenv
+
+load_dotenv()
 # Configuration
-SIGNALING_SERVER = "ws://192.168.3.105:8081"
-API_SERVER = "http://192.168.3.105:8081"
-STUN_SERVER = "stun://stun.l.google.com:19302"
+SIGNALING_SERVER = os.getenv("SIGNALING_SERVER", "ws://192.168.3.105:8081")
+API_SERVER = os.getenv("API_SERVER", "http://192.168.3.105:8081")
+STUN_SERVER = os.getenv("STUN_SERVER", "stun://stun.l.google.com:19302")
 
 ipc = None
 

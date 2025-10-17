@@ -67,7 +67,7 @@ class IPC:
                 logging.error(f"Permission denied to send signal to PID {pid}.")
         else:
             logging.error(f"Could not find PID for process {process_name}.")
-    def cleanup(self):
+    def cleanup(self): 
         if os.path.exists(self.pidfile):
             os.remove(self.pidfile)
             logging.info(f"Removed PID file {self.pidfile}.")

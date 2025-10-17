@@ -11,12 +11,14 @@ from earbud_input import (
     fn_mapping,
     getMode,
     set_ipc,
+    get_ipc,
     shared_memory_cleanup
 )
 from common import IPC
 
 def cleanup():
-    global ipc;
+    print("Cleaning up resources...")
+    ipc = get_ipc()
     shared_memory_cleanup()
     ipc.cleanup()
 def main():
@@ -37,9 +39,12 @@ def main():
             else:
                 print("Invalid input. Please try again.")
     except KeyboardInterrupt:
-        
         print("\nExiting Earbud Emulator.")
-
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        print("Exiting Earbud Emulator.")
+        cleanup()
 
 if __name__ == "__main__":
     atexit.register(cleanup)
