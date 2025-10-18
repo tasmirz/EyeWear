@@ -506,7 +506,7 @@ class WebRTCClient:
                   bundle-policy=max-bundle
                   latency=100
 
-                libcamerasrc
+                libcamerasrc af-mode=2
                 ! video/x-raw,width=640,height=480,framerate=30/1
                 ! queue max-size-buffers=1 leaky=downstream
                 ! videoconvert
