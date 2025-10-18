@@ -218,18 +218,27 @@
           >
             <video
               id="remoteVideo"
-              class="w-full h-full"
+                class="w-full h-full rotate-180"
               autoplay
               playsinline
             ></video>
           </div>
           <div class="flex justify-center mt-4">
-            <button
-              class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md"
-              onclick="endCall()"
-            >
-              End Call
-            </button>
+            <div class="flex gap-3">
+              <button
+                id="muteBtn"
+                class="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-md"
+                onclick="toggleMute()"
+              >
+                Mute
+              </button>
+              <button
+                class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md"
+                onclick="endCall()"
+              >
+                End Call
+              </button>
+            </div>
           </div>
         </div>
 

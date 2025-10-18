@@ -6,6 +6,7 @@ let pc = null;
 let currentPeerId = null;
 let callStartTime = null;
 let callDurationInterval = null;
+let micStream = null;
 let autoScroll = true;
 let logCount = 0;
 
@@ -374,6 +375,13 @@ async function takeCall(piId) {
       video: false,
     });
     debugLog("✅ Microphone access granted", "success");
+    // Reset mute state and enable mute button in UI
+    isMuted = false;
+    const muteBtn = document.getElementById("muteBtn");
+    if (muteBtn) {
+      muteBtn.textContent = "Mute";
+      muteBtn.disabled = false;
+    }
   } catch (err) {
     debugLog(`❌ Microphone access denied: ${err.message}`, "error");
     alert("Failed to access microphone. Please grant permission.");
@@ -587,6 +595,20 @@ function endCall() {
   currentPeerId = null;
   callStartTime = null;
 
+  // Reset mute UI
+  isMuted = false;
+  const muteBtn = document.getElementById("muteBtn");
+  if (muteBtn) {
+    muteBtn.textContent = "Mute";
+    muteBtn.disabled = true;
+  }
+  // send websocket message to end call on server side
+  ws.send(
+    JSON.stringify({
+      type: "end_call",
+      piId: currentPeerId,
+    })
+  );
   debugLog("✅ Call cleanup complete", "success");
 }
 
@@ -624,6 +646,38 @@ function muteLocalMic() {
 
 function unmuteLocalMic() {
   if (micStream) micStream.getAudioTracks().forEach((t) => (t.enabled = true));
+}
+
+// UI-facing mute toggle used by the Mute button
+let isMuted = false;
+function toggleMute() {
+  if (!micStream) {
+    debugLog("No local microphone stream to mute/unmute", "warning");
+    return;
+  }
+
+  isMuted = !isMuted;
+  if (isMuted) {
+    muteLocalMic();
+    debugLog("Microphone muted", "audio");
+  } else {
+    unmuteLocalMic();
+    debugLog("Microphone unmuted", "audio");
+  }
+
+  // Update UI button and indicator
+  const muteBtn = document.getElementById("muteBtn");
+  if (muteBtn) muteBtn.textContent = isMuted ? "Unmute" : "Mute";
+
+  const audioIndicator = document.getElementById("audioIndicator");
+  if (audioIndicator) {
+    audioIndicator.textContent = isMuted
+      ? "🔇 Muted"
+      : "🔊 WebSocket Streaming";
+    audioIndicator.className = isMuted
+      ? "inline-flex items-center px-3 py-1 rounded-md bg-red-50 text-red-700 text-sm"
+      : "inline-flex items-center px-3 py-1 rounded-md bg-green-50 text-green-700 text-sm";
+  }
 }
 
 function updateCallDuration() {

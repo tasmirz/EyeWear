@@ -589,6 +589,9 @@ class WebRTCClient:
                     elif msg_type == 'peer_disconnected':
                         print("\n📴 Operator disconnected")
                         await self.stop_call()
+                    elif msg_type == 'call_ended':
+                        print("\n📴 Call ended by operator")
+                        await self.stop_call()
                     elif msg_type == 'error':
                         print(f"❌ Server error: {data.get('message')}")
                 except json.JSONDecodeError as e:
