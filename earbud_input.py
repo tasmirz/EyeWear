@@ -53,8 +53,9 @@ button_map = {
     165: "SINGLE_TAP"    # previoussong
 }
 
-mode_of_operation = "IDLE" , # can be IDLE, CALL, OCR
-getMode = lambda: mode_of_operation
+mode_of_operation = 'IDLE' , # can be IDLE, CALL, OCR
+def  getMode():
+    return globals().get('mode_of_operation', 'IDLE')
 setMode = lambda mode: globals().update(mode_of_operation=mode)
 
 

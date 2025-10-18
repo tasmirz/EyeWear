@@ -1,4 +1,5 @@
-// WebRTC Signaling Server with Authentication and MongoDB
+// WebRTC Signaling Server with WebSocket Audio
+// Video: WebRTC, Audio: WebSocket
 // Run with: node server.js
 
 const express = require("express");
@@ -11,6 +12,7 @@ const bcrypt = require("bcrypt");
 const dotenv = require("dotenv");
 
 dotenv.config();
+
 // Configuration
 const PORT = process.env.PORT || 8081;
 const MONGODB_URI =
@@ -28,7 +30,6 @@ app.use(express.json());
 app.use(express.static("public"));
 
 // MongoDB Schemas
-
 const deviceSchema = new mongoose.Schema({
   fingerprint: { type: String, required: true, unique: true },
   public_key: { type: String, required: true, unique: true },
@@ -101,10 +102,7 @@ app.post("/api/challenge", async (req, res) => {
       return res.status(400).json({ error: "Public key required" });
     }
 
-    // Verify device exists in database
-    const device = await Device.findOne({
-      public_key: publicKey,
-    });
+    const device = await Device.findOne({ public_key: publicKey });
     console.log("Device found:", device);
     if (!device) {
       return res
@@ -112,7 +110,6 @@ app.post("/api/challenge", async (req, res) => {
         .json({ error: "Device not registered or inactive" });
     }
 
-    // Generate random challenge
     const challengeText = crypto.randomBytes(32).toString("hex");
     const challengeToken = jwt.sign(
       { publicKey, challenge: challengeText },
@@ -120,19 +117,14 @@ app.post("/api/challenge", async (req, res) => {
       { expiresIn: "5m" }
     );
 
-    // Store challenge temporarily
     authChallenges.set(publicKey, {
       challenge: challengeText,
       timestamp: Date.now(),
     });
 
-    // Clean up old challenges
     setTimeout(() => authChallenges.delete(publicKey), CHALLENGE_EXPIRY);
 
-    res.json({
-      challengeToken,
-      challengeText,
-    });
+    res.json({ challengeToken, challengeText });
   } catch (error) {
     console.error("Challenge error:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -148,7 +140,6 @@ app.post("/api/auth", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Verify challenge token
     let decoded;
     try {
       decoded = jwt.verify(challengeToken, JWT_SECRET);
@@ -160,26 +151,18 @@ app.post("/api/auth", async (req, res) => {
 
     const { publicKey, challenge } = decoded;
 
-    // Verify challenge exists
     const storedChallenge = authChallenges.get(publicKey);
     if (!storedChallenge || storedChallenge.challenge !== challenge) {
       return res.status(401).json({ error: "Challenge expired or invalid" });
     }
 
-    // In production, verify the signature using the public key
-    // For now, we'll assume the signature is valid
-    // const isValid = crypto.verify('sha256', Buffer.from(challenge), publicKey, Buffer.from(signedChallenge, 'base64'));
-
-    // Clean up challenge
     authChallenges.delete(publicKey);
 
-    // Update device last seen
     await Device.findOneAndUpdate(
       { public_key: publicKey },
       { last_seen: Date.now() }
     );
 
-    // Generate final JWT
     const finalToken = jwt.sign(
       { public_key: publicKey, type: "device" },
       JWT_SECRET,
@@ -221,11 +204,7 @@ app.post("/api/operator/login", async (req, res) => {
       { expiresIn: "8h" }
     );
 
-    res.json({
-      token,
-      role: operator.role,
-      username,
-    });
+    res.json({ token, role: operator.role, username });
   } catch (error) {
     console.error("Operator login error:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -278,17 +257,13 @@ app.delete(
   async (req, res) => {
     try {
       const { id } = req.params;
-
       const operator = await Operator.findById(id);
       if (!operator) {
         return res.status(404).json({ error: "Operator not found" });
       }
-
-      // Prevent deleting default admin
       if (operator.username === "admin") {
         return res.status(403).json({ error: "Cannot delete default admin" });
       }
-
       await Operator.findByIdAndDelete(id);
       res.json({ message: "Operator deleted successfully" });
     } catch (error) {
@@ -306,12 +281,10 @@ app.delete(
   async (req, res) => {
     try {
       const { id } = req.params;
-
       const device = await Device.findById(id);
       if (!device) {
         return res.status(404).json({ error: "Device not found" });
       }
-
       await Device.findByIdAndDelete(id);
       res.json({ message: "Device deleted successfully" });
     } catch (error) {
@@ -434,7 +407,6 @@ wss.on("connection", (ws, req) => {
   ws.on("message", async (message) => {
     try {
       const data = JSON.parse(message);
-      console.log(`Message from ${clientId}:`, data.type);
 
       // Authentication required first
       if (data.type === "authenticate") {
@@ -474,7 +446,6 @@ wss.on("connection", (ws, req) => {
             });
             console.log(`✅ Operator authenticated: ${decoded.username}`);
 
-            // Send current state
             ws.send(
               JSON.stringify({
                 type: "authenticated",
@@ -589,7 +560,26 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      // Forward WebRTC signaling
+      // Handle audio data routing
+      if (data.type === "audio_data") {
+        const peerId = ws.peerId || data.to;
+        if (peerId) {
+          const peer =
+            piClients.get(peerId)?.ws || operatorClients.get(peerId)?.ws;
+          if (peer && peer.readyState === WebSocket.OPEN) {
+            peer.send(
+              JSON.stringify({
+                type: "audio_data",
+                data: data.data,
+                from: clientId,
+              })
+            );
+          }
+        }
+        return;
+      }
+
+      // Forward WebRTC signaling (video only)
       if (["offer", "answer", "candidate"].includes(data.type)) {
         const peerId = ws.peerId || data.to;
 
@@ -600,6 +590,24 @@ wss.on("connection", (ws, req) => {
             const payload = { ...data, from: clientId };
             peer.send(JSON.stringify(payload));
             console.log(`Forwarded ${data.type} from ${clientId} to ${peerId}`);
+          }
+        }
+      }
+
+      // Handle mute status
+      if (data.type === "mute_status") {
+        const peerId = ws.peerId || data.to;
+        if (peerId) {
+          const peer =
+            piClients.get(peerId)?.ws || operatorClients.get(peerId)?.ws;
+          if (peer) {
+            peer.send(
+              JSON.stringify({
+                type: "mute_status",
+                muted: data.muted,
+                from: clientId,
+              })
+            );
           }
         }
       }
@@ -673,8 +681,10 @@ function generateId() {
 
 // Start server
 server.listen(PORT, () => {
-  console.log(`\n🚀 WebRTC Signaling Server Running`);
+  console.log(`\n🚀 WebRTC Signaling Server with WebSocket Audio`);
   console.log(`   HTTP: http://localhost:${PORT}`);
   console.log(`   WebSocket: ws://localhost:${PORT}`);
-  console.log(`   MongoDB: ${MONGODB_URI}\n`);
+  console.log(`   MongoDB: ${MONGODB_URI}`);
+  console.log(`   Audio: WebSocket streaming`);
+  console.log(`   Video: WebRTC (H.264)\n`);
 });
