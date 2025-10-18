@@ -1,748 +1,278 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Admin Dashboard</title>
+    <!-- Tailwind via CDN for quick integration -->
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f5;
-            color: #333;
-        }
-
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-
-        .header {
-            background: white;
-            padding: 20px;
-            margin-bottom: 30px;
-            border-radius: 8px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-
-        .header h1 {
-            font-size: 24px;
-            font-weight: 600;
-        }
-
-        .user-info {
-            display: flex;
-            gap: 15px;
-            align-items: center;
-        }
-
-        .btn {
-            padding: 8px 16px;
-            border: none;
-            border-radius: 4px;
-            font-size: 14px;
-            cursor: pointer;
-            font-weight: 500;
-            transition: opacity 0.2s;
-        }
-
-        .btn:hover {
-            opacity: 0.9;
-        }
-
-        .btn-primary {
-            background: #333;
-            color: white;
-        }
-
-        .btn-secondary {
-            background: #666;
-            color: white;
-        }
-
-        .btn-danger {
-            background: #e74c3c;
-            color: white;
-        }
-
-        .btn-small {
-            padding: 6px 12px;
-            font-size: 12px;
-        }
-
-        .login-box {
-            max-width: 400px;
-            margin: 100px auto;
-            background: white;
-            padding: 30px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-
-        .login-box h2 {
-            margin-bottom: 20px;
-            text-align: center;
-        }
-
-        .form-group {
-            margin-bottom: 15px;
-        }
-
-        .form-group label {
-            display: block;
-            margin-bottom: 5px;
-            font-size: 14px;
-            font-weight: 500;
-        }
-
-        .form-group input,
-        .form-group select,
-        .form-group textarea {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-
-        .form-group input:focus,
-        .form-group select:focus,
-        .form-group textarea:focus {
-            outline: none;
-            border-color: #333;
-        }
-
-        .section {
-            background: white;
-            padding: 20px;
-            margin-bottom: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-
-        .section-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 15px;
-            border-bottom: 1px solid #eee;
-        }
-
-        .section-header h2 {
-            font-size: 18px;
-            font-weight: 600;
-        }
-
-        .table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        .table th {
-            text-align: left;
-            padding: 12px;
-            font-size: 12px;
-            text-transform: uppercase;
-            color: #666;
-            font-weight: 600;
-            border-bottom: 2px solid #eee;
-        }
-
-        .table td {
-            padding: 12px;
-            border-bottom: 1px solid #f5f5f5;
-        }
-
-        .table tr:hover {
-            background: #fafafa;
-        }
-
-        .badge {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 600;
-        }
-
-        .badge-admin {
-            background: #333;
-            color: white;
-        }
-
-        .badge-operator {
-            background: #e0e0e0;
-            color: #333;
-        }
-
-        .badge-active {
-            background: #d4edda;
-            color: #155724;
-        }
-
-        .badge-inactive {
-            background: #f8d7da;
-            color: #721c24;
-        }
-
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0,0,0,0.5);
-            z-index: 1000;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .modal.active {
-            display: flex;
-        }
-
-        .modal-content {
-            background: white;
-            padding: 30px;
-            border-radius: 8px;
-            max-width: 500px;
-            width: 90%;
-            max-height: 90vh;
-            overflow-y: auto;
-        }
-
-        .modal-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 15px;
-            border-bottom: 1px solid #eee;
-        }
-
-        .modal-header h3 {
-            font-size: 18px;
-            font-weight: 600;
-        }
-
-        .close-btn {
-            background: none;
-            border: none;
-            font-size: 24px;
-            cursor: pointer;
-            color: #999;
-        }
-
-        .close-btn:hover {
-            color: #333;
-        }
-
-        .alert {
-            padding: 12px;
-            border-radius: 4px;
-            margin-bottom: 15px;
-            font-size: 14px;
-        }
-
-        .alert-success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
-        }
-
-        .alert-error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-        }
-
-        .empty-state {
-            text-align: center;
-            padding: 40px;
-            color: #999;
-        }
-
-        .code {
-            background: #f5f5f5;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-family: monospace;
-            font-size: 13px;
-        }
-
-        .dashboard {
-            display: none;
-        }
-
-        .dashboard.active {
-            display: block;
-        }
-
-        .actions {
-            display: flex;
-            gap: 8px;
-        }
-
-        .text-muted {
-            color: #999;
-            font-size: 12px;
-        }
-
-        .note {
-            background: #fffbf0;
-            border-left: 3px solid #ffc107;
-            padding: 12px;
-            margin-top: 10px;
-            font-size: 13px;
-            color: #856404;
-        }
+      /* Minimal overrides for modal visibility controlled by JS classes */
+      .modal {
+        display: none;
+      }
+      .modal.active {
+        display: flex;
+      }
+      .dashboard {
+        display: none;
+      }
+      .dashboard.active {
+        display: block;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
     <!-- Login -->
-    <div id="loginSection" class="login-box">
-        <h2>Admin Login</h2>
-        <div id="loginAlert"></div>
-        <form id="loginForm">
-            <div class="form-group">
-                <label>Username</label>
-                <input type="text" id="username" required>
-            </div>
-            <div class="form-group">
-                <label>Password</label>
-                <input type="password" id="password" required>
-            </div>
-            <button type="submit" class="btn btn-primary" style="width: 100%;">
-                Login
-            </button>
-        </form>
-        <p class="text-muted" style="margin-top: 15px; text-align: center;">
-            Default: admin / admin
-        </p>
+    <div
+      id="loginSection"
+      class="max-w-md mx-auto mt-24 bg-white p-8 rounded-lg shadow"
+    >
+      <h2 class="text-xl font-semibold text-center mb-4">Admin Login</h2>
+      <div id="loginAlert"></div>
+      <form id="loginForm">
+        <div class="mb-4">
+          <label class="block text-sm font-medium mb-1">Username</label>
+          <input
+            type="text"
+            id="username"
+            required
+            class="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-gray-300"
+          />
+        </div>
+        <div class="mb-4">
+          <label class="block text-sm font-medium mb-1">Password</label>
+          <input
+            type="password"
+            id="password"
+            required
+            class="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-gray-300"
+          />
+        </div>
+        <button
+          type="submit"
+          class="w-full bg-gray-900 text-white py-2 rounded-md font-medium hover:opacity-90"
+        >
+          Login
+        </button>
+      </form>
+      <p class="text-sm text-gray-500 mt-4 text-center">
+        Default: admin / admin
+      </p>
     </div>
 
     <!-- Dashboard -->
     <div id="dashboard" class="dashboard">
-        <div class="container">
-            <div class="header">
-                <h1>Admin Dashboard</h1>
-                <div class="user-info">
-                    <span id="adminName">Admin</span>
-                    <button class="btn btn-danger btn-small" onclick="logout()">Logout</button>
-                </div>
-            </div>
-
-            <!-- Operators Section -->
-            <div class="section">
-                <div class="section-header">
-                    <h2>Operators</h2>
-                    <button class="btn btn-primary btn-small" onclick="openAddOperator()">
-                        + Add Operator
-                    </button>
-                </div>
-                <div id="operatorAlert"></div>
-                <table class="table" id="operatorsTable">
-                    <thead>
-                        <tr>
-                            <th>Username</th>
-                            <th>Role</th>
-                            <th>Created</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="operatorsBody">
-                        <tr>
-                            <td colspan="4" class="empty-state">Loading...</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-
-            <!-- Devices Section -->
-            <div class="section">
-                <div class="section-header">
-                    <h2>Devices</h2>
-                    <button class="btn btn-primary btn-small" onclick="openAddDevice()">
-                        + Add Device
-                    </button>
-                </div>
-                <div id="deviceAlert"></div>
-                <table class="table" id="devicesTable">
-                    <thead>
-                        <tr>
-                            <th>Device Name</th>
-                            <th>Public Key</th>
-                            <th>Status</th>
-                            <th>Last Seen</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="devicesBody">
-                        <tr>
-                            <td colspan="5" class="empty-state">Loading...</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
+      <div class="max-w-6xl mx-auto p-6">
+        <div
+          class="bg-white p-5 mb-6 rounded-lg shadow flex justify-between items-center"
+        >
+          <h1 class="text-2xl font-semibold">Admin Dashboard</h1>
+          <div class="flex items-center gap-4">
+            <span id="adminName" class="font-medium">Admin</span>
+            <button
+              class="bg-red-600 text-white text-sm px-3 py-1 rounded-md"
+              onclick="logout()"
+            >
+              Logout
+            </button>
+          </div>
         </div>
+
+        <!-- Operators Section -->
+        <div class="bg-white p-5 mb-6 rounded-lg shadow">
+          <div class="flex justify-between items-center border-b pb-4 mb-4">
+            <h2 class="text-lg font-semibold">Operators</h2>
+            <button
+              class="bg-gray-900 text-white text-sm px-3 py-1 rounded-md"
+              onclick="openAddOperator()"
+            >
+              + Add Operator
+            </button>
+          </div>
+          <div id="operatorAlert"></div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left" id="operatorsTable">
+              <thead>
+                <tr class="text-xs text-gray-600 uppercase">
+                  <th class="px-3 py-2">Username</th>
+                  <th class="px-3 py-2">Role</th>
+                  <th class="px-3 py-2">Created</th>
+                  <th class="px-3 py-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="operatorsBody">
+                <tr>
+                  <td colspan="4" class="text-center text-gray-500 py-8">
+                    Loading...
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Devices Section -->
+        <div class="bg-white p-5 mb-6 rounded-lg shadow">
+          <div class="flex justify-between items-center border-b pb-4 mb-4">
+            <h2 class="text-lg font-semibold">Devices</h2>
+            <button
+              class="bg-gray-900 text-white text-sm px-3 py-1 rounded-md"
+              onclick="openAddDevice()"
+            >
+              + Add Device
+            </button>
+          </div>
+          <div id="deviceAlert"></div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left" id="devicesTable">
+              <thead>
+                <tr class="text-xs text-gray-600 uppercase">
+                  <th class="px-3 py-2">Device Name</th>
+                  <th class="px-3 py-2">Public Key</th>
+                  <th class="px-3 py-2">Status</th>
+                  <th class="px-3 py-2">Last Seen</th>
+                  <th class="px-3 py-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="devicesBody">
+                <tr>
+                  <td colspan="5" class="text-center text-gray-500 py-8">
+                    Loading...
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Add Operator Modal -->
-    <div id="addOperatorModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Add Operator</h3>
-                <button class="close-btn" onclick="closeAddOperator()">&times;</button>
-            </div>
-            <div id="operatorModalAlert"></div>
-            <form id="addOperatorForm">
-                <div class="form-group">
-                    <label>Username</label>
-                    <input type="text" id="operatorUsername" required>
-                </div>
-                <div class="form-group">
-                    <label>Password</label>
-                    <input type="password" id="operatorPassword" required>
-                </div>
-                <div class="form-group">
-                    <label>Role</label>
-                    <select id="operatorRole">
-                        <option value="operator">Operator</option>
-                        <option value="admin">Admin</option>
-                    </select>
-                </div>
-                <div style="display: flex; gap: 10px; margin-top: 20px;">
-                    <button type="submit" class="btn btn-primary" style="flex: 1;">
-                        Add Operator
-                    </button>
-                    <button type="button" class="btn btn-secondary" onclick="closeAddOperator()">
-                        Cancel
-                    </button>
-                </div>
-            </form>
+    <div
+      id="addOperatorModal"
+      class="modal items-center justify-center fixed inset-0 bg-black/50 z-50"
+    >
+      <div class="bg-white rounded-lg p-6 w-full max-w-md">
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="text-lg font-semibold">Add Operator</h3>
+          <button
+            class="text-gray-500 hover:text-gray-800"
+            onclick="closeAddOperator()"
+          >
+            &times;
+          </button>
         </div>
+        <div id="operatorModalAlert"></div>
+        <form id="addOperatorForm">
+          <div class="mb-3">
+            <label class="block text-sm font-medium mb-1">Username</label>
+            <input
+              type="text"
+              id="operatorUsername"
+              required
+              class="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-gray-300"
+            />
+          </div>
+          <div class="mb-3">
+            <label class="block text-sm font-medium mb-1">Password</label>
+            <input
+              type="password"
+              id="operatorPassword"
+              required
+              class="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-gray-300"
+            />
+          </div>
+          <div class="mb-4">
+            <label class="block text-sm font-medium mb-1">Role</label>
+            <select
+              id="operatorRole"
+              class="w-full px-3 py-2 border rounded-md"
+            >
+              <option value="operator">Operator</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          <div class="flex gap-3 mt-4">
+            <button
+              type="submit"
+              class="flex-1 bg-gray-900 text-white py-2 rounded-md"
+            >
+              Add Operator
+            </button>
+            <button
+              type="button"
+              class="flex-0 bg-gray-200 text-gray-800 py-2 px-3 rounded-md"
+              onclick="closeAddOperator()"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
 
     <!-- Add Device Modal -->
-    <div id="addDeviceModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Add Device</h3>
-                <button class="close-btn" onclick="closeAddDevice()">&times;</button>
-            </div>
-            <div id="deviceModalAlert"></div>
-            <form id="addDeviceForm">
-                <div class="form-group">
-                    <label>Device Name</label>
-                    <input type="text" id="fingerprint" required placeholder="e.g., Pi Camera 1">
-                </div>
-                <div class="form-group">
-                    <label>Public Key</label>
-                    <textarea id="devicePublicKey" rows="3" required placeholder="Enter device public key"></textarea>
-                    <div class="note">
-                        💡 The device will use this public key for authentication
-                    </div>
-                </div>
-                <div style="display: flex; gap: 10px; margin-top: 20px;">
-                    <button type="submit" class="btn btn-primary" style="flex: 1;">
-                        Add Device
-                    </button>
-                    <button type="button" class="btn btn-secondary" onclick="closeAddDevice()">
-                        Cancel
-                    </button>
-                </div>
-            </form>
+    <div
+      id="addDeviceModal"
+      class="modal items-center justify-center fixed inset-0 bg-black/50 z-50"
+    >
+      <div class="bg-white rounded-lg p-6 w-full max-w-md">
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="text-lg font-semibold">Add Device</h3>
+          <button
+            class="text-gray-500 hover:text-gray-800"
+            onclick="closeAddDevice()"
+          >
+            &times;
+          </button>
         </div>
+        <div id="deviceModalAlert"></div>
+        <form id="addDeviceForm">
+          <div class="mb-3">
+            <label class="block text-sm font-medium mb-1">Device Name</label>
+            <input
+              type="text"
+              id="fingerprint"
+              required
+              placeholder="e.g., Pi Camera 1"
+              class="w-full px-3 py-2 border rounded-md"
+            />
+          </div>
+          <div class="mb-3">
+            <label class="block text-sm font-medium mb-1">Public Key</label>
+            <textarea
+              id="devicePublicKey"
+              rows="3"
+              required
+              placeholder="Enter device public key"
+              class="w-full px-3 py-2 border rounded-md"
+            ></textarea>
+            <div
+              class="mt-2 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-700 p-3 text-sm rounded"
+            >
+              💡 The device will use this public key for authentication
+            </div>
+          </div>
+          <div class="flex gap-3 mt-4">
+            <button
+              type="submit"
+              class="flex-1 bg-gray-900 text-white py-2 rounded-md"
+            >
+              Add Device
+            </button>
+            <button
+              type="button"
+              class="flex-0 bg-gray-200 text-gray-800 py-2 px-3 rounded-md"
+              onclick="closeAddDevice()"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
 
-    <script>
-        let authToken = null;
-        const API_URL = `http://${window.location.host}`;
-
-        if (localStorage.getItem('AauthToken')) {
-            authToken = localStorage.getItem('AauthToken');
-            const username = localStorage.getItem('Ausername');
-            document.getElementById('adminName').textContent = username;
-            document.getElementById('loginSection').style.display = 'none';
-            document.getElementById('dashboard').classList.add('active');
-            loadOperators();
-            loadDevices();
-        }
-
-        // Login
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            
-            try {
-                const response = await fetch(`${API_URL}/api/operator/login`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password })
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    if (data.role !== 'admin') {
-                        showAlert('loginAlert', 'Access denied. Admin role required.', 'error');
-                        return;
-                    }
-                    
-                    authToken = data.token;
-                    // save to localStorage/sessionStorage if needed
-                    localStorage.setItem('AauthToken', authToken);
-                    localStorage.setItem('Ausername', username);
-
-                    document.getElementById('adminName').textContent = data.username;
-                    document.getElementById('loginSection').style.display = 'none';
-                    document.getElementById('dashboard').classList.add('active');
-                    
-                    loadOperators();
-                    loadDevices();
-                } else {
-                    showAlert('loginAlert', data.error || 'Login failed', 'error');
-                }
-            } catch (error) {
-                showAlert('loginAlert', 'Connection error', 'error');
-            }
-        });
-
-        function logout() {
-            authToken = null;
-            document.getElementById('loginSection').style.display = 'block';
-            document.getElementById('dashboard').classList.remove('active');
-            document.getElementById('username').value = '';
-            document.getElementById('password').value = '';
-            localStorage.removeItem('AauthToken');
-            localStorage.removeItem('Ausername');
-        }
-
-        // Load Operators
-        async function loadOperators() {
-            try {
-                const response = await fetch(`${API_URL}/api/admin/operators`, {
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-                
-                const data = await response.json();
-                const tbody = document.getElementById('operatorsBody');
-                
-                if (data.operators && data.operators.length > 0) {
-                    tbody.innerHTML = data.operators.map(op => `
-                        <tr>
-                            <td><strong>${op.username}</strong></td>
-                            <td><span class="badge badge-${op.role}">${op.role}</span></td>
-                            <td class="text-muted">${new Date(op.createdAt).toLocaleDateString()}</td>
-                            <td>
-                                <div class="actions">
-                                    ${op.username !== 'admin' ? `
-                                        <button class="btn btn-danger btn-small" onclick="deleteOperator('${op._id}', '${op.username}')">
-                                            Delete
-                                        </button>
-                                    ` : '<span class="text-muted">Protected</span>'}
-                                </div>
-                            </td>
-                        </tr>
-                    `).join('');
-                } else {
-                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No operators found</td></tr>';
-                }
-            } catch (error) {
-                console.error('Error loading operators:', error);
-                showAlert('operatorAlert', 'Failed to load operators', 'error');
-            }
-        }
-
-        // Load Devices
-        async function loadDevices() {
-            try {
-                const response = await fetch(`${API_URL}/api/admin/devices`, {
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-                
-                const data = await response.json();
-                const tbody = document.getElementById('devicesBody');
-                
-                if (data.devices && data.devices.length > 0) {
-                    tbody.innerHTML = data.devices.map(device => `
-                        <tr>
-                            <td><strong>${device.fingerprint}</strong></td>
-                            <td><span class="code">${device.public_key.slice(0, 30)}...</span></td>
-                            <td><span class="badge badge-${device.status}">${device.status}</span></td>
-                            <td class="text-muted">${new Date(device.lastSeen).toLocaleString()}</td>
-                            <td>
-                                <div class="actions">
-                                    <button class="btn btn-danger btn-small" onclick="deleteDevice('${device._id}', '${device.fingerprint}')">
-                                        Delete
-                                    </button>
-                                </div>
-                            </td>
-                        </tr>
-                    `).join('');
-                } else {
-                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No devices registered</td></tr>';
-                }
-            } catch (error) {
-                console.error('Error loading devices:', error);
-                showAlert('deviceAlert', 'Failed to load devices', 'error');
-            }
-        }
-
-        // Add Operator
-        function openAddOperator() {
-            document.getElementById('addOperatorModal').classList.add('active');
-            document.getElementById('addOperatorForm').reset();
-            document.getElementById('operatorModalAlert').innerHTML = '';
-        }
-
-        function closeAddOperator() {
-            document.getElementById('addOperatorModal').classList.remove('active');
-        }
-
-        document.getElementById('addOperatorForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            
-            const username = document.getElementById('operatorUsername').value;
-            const password = document.getElementById('operatorPassword').value;
-            const role = document.getElementById('operatorRole').value;
-            
-            try {
-                const response = await fetch(`${API_URL}/api/admin/operators`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${authToken}`
-                    },
-                    body: JSON.stringify({ username, password, role })
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    showAlert('operatorAlert', `Operator "${username}" added successfully`, 'success');
-                    closeAddOperator();
-                    loadOperators();
-                } else {
-                    showAlert('operatorModalAlert', data.error || 'Failed to add operator', 'error');
-                }
-            } catch (error) {
-                showAlert('operatorModalAlert', 'Connection error', 'error');
-            }
-        });
-
-        // Add Device
-        function openAddDevice() {
-            document.getElementById('addDeviceModal').classList.add('active');
-            document.getElementById('addDeviceForm').reset();
-            document.getElementById('deviceModalAlert').innerHTML = '';
-        }
-
-        function closeAddDevice() {
-            document.getElementById('addDeviceModal').classList.remove('active');
-        }
-
-        document.getElementById('addDeviceForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            
-            const fingerprint = document.getElementById('fingerprint').value;
-            const public_key = document.getElementById('devicePublicKey').value.trim();
-            
-            try {
-                const response = await fetch(`${API_URL}/api/admin/devices`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${authToken}`
-                    },
-                    body: JSON.stringify({ fingerprint, public_key })
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    showAlert('deviceAlert', `Device "${fingerprint}" added successfully`, 'success');
-                    closeAddDevice();
-                    loadDevices();
-                } else {
-                    showAlert('deviceModalAlert', data.error || 'Failed to add device', 'error');
-                }
-            } catch (error) {
-                showAlert('deviceModalAlert', 'Connection error', 'error');
-            }
-        });
-
-        // Delete Operator
-        async function deleteOperator(id, username) {
-            if (!confirm(`Delete operator "${username}"?`)) return;
-            
-            try {
-                const response = await fetch(`${API_URL}/api/admin/operators/${id}`, {
-                    method: 'DELETE',
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-                
-                if (response.ok) {
-                    showAlert('operatorAlert', `Operator "${username}" deleted`, 'success');
-                    loadOperators();
-                } else {
-                    showAlert('operatorAlert', 'Failed to delete operator', 'error');
-                }
-            } catch (error) {
-                showAlert('operatorAlert', 'Connection error', 'error');
-            }
-        }
-
-        // Delete Device
-        async function deleteDevice(id, fingerprint) {
-            if (!confirm(`Delete device "${fingerprint}"?`)) return;
-            
-            try {
-                const response = await fetch(`${API_URL}/api/admin/devices/${id}`, {
-                    method: 'DELETE',
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-                
-                if (response.ok) {
-                    showAlert('deviceAlert', `Device "${fingerprint}" deleted`, 'success');
-                    loadDevices();
-                } else {
-                    showAlert('deviceAlert', 'Failed to delete device', 'error');
-                }
-            } catch (error) {
-                showAlert('deviceAlert', 'Connection error', 'error');
-            }
-        }
-
-        function showAlert(elementId, message, type) {
-            const alertDiv = document.getElementById(elementId);
-            alertDiv.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
-            setTimeout(() => {
-                alertDiv.innerHTML = '';
-            }, 5000);
-        }
-
-        // Close modals on background click
-        document.querySelectorAll('.modal').forEach(modal => {
-            modal.addEventListener('click', (e) => {
-                if (e.target === modal) {
-                    modal.classList.remove('active');
-                }
-            });
-        });
-    </script>
-</body>
+    <script src="/admin.js"></script>
+  </body>
 </html>

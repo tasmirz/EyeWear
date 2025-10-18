@@ -228,219 +228,6 @@ class WebRTCClient:
         )
         return base64.b64encode(signature).decode()
 
-    def start_arecord(self):
-        """Start arecord subprocess for continuous microphone capture"""
-        try:
-            self.stop_arecord()
-            
-            # Use bluealsa device for Bluetooth
-            alsa_device = bluealsa_dev_string(BT_MAC, "sco")
-            
-            cmd = [
-                'arecord',
-                '-D', alsa_device,
-                '-f', 'S16_LE',  # RAW PCM 16-bit signed little-endian
-                '-r', '16000',   # 16kHz sample rate (voice quality)
-                '-c', '1',       # Mono
-                '-t', 'raw',     # RAW format (no WAV header)
-            ]
-            
-            print(f"🎤 Starting arecord: {' '.join(cmd)}")
-            self.arecord_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0
-            )
-            
-            # Check if process started successfully
-            time.sleep(0.2)
-            if self.arecord_process.poll() is not None:
-                stderr = self.arecord_process.stderr.read().decode('utf-8', errors='ignore')
-                print(f"❌ arecord failed: {stderr}")
-                self.arecord_process = None
-                return False
-            
-            print(f"✅ arecord started (PID: {self.arecord_process.pid})")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error starting arecord: {e}")
-            traceback.print_exc()
-            return False
-
-    def stop_arecord(self):
-        """Stop arecord process"""
-        if self.arecord_process:
-            try:
-                print("🛑 Stopping arecord...")
-                self.arecord_process.terminate()
-                self.arecord_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.arecord_process.kill()
-            except Exception as e:
-                print(f"⚠️ Error stopping arecord: {e}")
-            finally:
-                self.arecord_process = None
-
-    def start_aplay(self):
-        """Start aplay subprocess for continuous audio playback"""
-        try:
-            self.stop_aplay()
-            
-            # Use bluealsa device for Bluetooth
-            alsa_device = bluealsa_dev_string(BT_MAC, "sco")
-            
-            cmd = [
-                'aplay',
-                '-D', alsa_device,
-                '-f', 'S16_LE',  # RAW PCM 16-bit
-                '-r', '16000',   # 16kHz (voice quality)
-                '-c', '1',       # Mono
-                '-t', 'raw',     # RAW format
-                '-q'             # Quiet mode
-            ]
-            
-            print(f"🔊 Starting aplay: {' '.join(cmd)}")
-            self.aplay_process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0
-            )
-            
-            time.sleep(0.2)
-            if self.aplay_process.poll() is not None:
-                stderr = self.aplay_process.stderr.read().decode('utf-8', errors='ignore')
-                print(f"❌ aplay failed: {stderr}")
-                self.aplay_process = None
-                return False
-            
-            print(f"✅ aplay started (PID: {self.aplay_process.pid})")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error starting aplay: {e}")
-            traceback.print_exc()
-            return False
-
-    def stop_aplay(self):
-        """Stop aplay process"""
-        if self.aplay_process:
-            try:
-                print("🛑 Stopping aplay...")
-                if self.aplay_process.stdin:
-                    self.aplay_process.stdin.close()
-                self.aplay_process.terminate()
-                self.aplay_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.aplay_process.kill()
-            except Exception as e:
-                print(f"⚠️ Error stopping aplay: {e}")
-            finally:
-                self.aplay_process = None
-
-    async def audio_send_loop(self):
-        """Continuously read from arecord and send to operator via WebSocket"""
-        try:
-            print("🎤 Starting continuous audio send loop...")
-            chunk_count = 0
-            
-            while self.in_call and self.arecord_process:
-                if not self.audio_enabled or self.muted:
-                    await asyncio.sleep(0.01)
-                    continue
-                
-                try:
-                    # Read audio chunk from arecord stdout
-                    audio_data = self.arecord_process.stdout.read(AUDIO_CHUNK_SIZE)
-                    
-                    if not audio_data:
-                        print("⚠️ No audio data from arecord, process may have ended")
-                        break
-                    
-                    # Encode to base64 and send via WebSocket
-                    audio_b64 = base64.b64encode(audio_data).decode('utf-8')
-                    
-                    if self.ws and self.connected:
-                        await self.ws.send(json.dumps({
-                            'type': 'audio_data',
-                            'data': audio_b64,
-                            'to': self.peer_id
-                        }))
-                        
-                        chunk_count += 1
-                        if chunk_count % 100 == 0:
-                            print(f"🎤 Sent {chunk_count} audio chunks")
-                    
-                    # Small delay to prevent overwhelming the WebSocket
-                    await asyncio.sleep(0.001)
-                    
-                except BrokenPipeError:
-                    print("⚠️ Broken pipe in audio send")
-                    break
-                except Exception as e:
-                    if self.in_call:
-                        print(f"⚠️ Audio send error: {e}")
-                    break
-                    
-        except Exception as e:
-            print(f"❌ Audio send loop error: {e}")
-            traceback.print_exc()
-        finally:
-            print(f"🛑 Audio send loop stopped (sent {chunk_count} chunks)")
-
-    async def audio_receive_loop(self):
-        """Handle audio data reception (actual writing happens in handle_audio_data)"""
-        try:
-            print("🔊 Audio receive loop ready...")
-            chunk_count = 0
-            
-            while self.in_call:
-                await asyncio.sleep(0.1)
-                
-        except Exception as e:
-            print(f"❌ Audio receive loop error: {e}")
-        finally:
-            print("🛑 Audio receive loop stopped")
-
-    async def handle_audio_data(self, audio_b64):
-        """Handle received audio data from operator and write to aplay"""
-        try:
-            if not self.in_call:
-                return
-            
-            # Decode base64 audio data
-            audio_data = base64.b64decode(audio_b64)
-            
-            # Check if aplay is still running
-            if not self.aplay_process or self.aplay_process.poll() is not None:
-                print("⚠️ aplay process died, restarting...")
-                if not self.start_aplay():
-                    print("❌ Failed to restart aplay")
-                    return
-            
-            # Write to aplay stdin with error handling
-            if self.aplay_process and self.aplay_process.stdin:
-                try:
-                    self.aplay_process.stdin.write(audio_data)
-                    self.aplay_process.stdin.flush()
-                except BrokenPipeError:
-                    print("⚠️ Broken pipe to aplay, restarting...")
-                    if self.start_aplay():
-                        # Try writing again after restart
-                        try:
-                            self.aplay_process.stdin.write(audio_data)
-                            self.aplay_process.stdin.flush()
-                        except Exception:
-                            pass
-                except Exception as e:
-                    print(f"⚠️ Error writing to aplay: {e}")
-                    
-        except Exception as e:
-            if self.in_call:
-                print(f"⚠️ Error handling audio data: {e}")
-
     async def stop_call(self):
         if not self.in_call:
             return
@@ -527,6 +314,14 @@ class WebRTCClient:
                 ! rtpopuspay pt=97
                 ! application/x-rtp,media=audio,encoding-name=OPUS,payload=97
                 ! webrtc.
+                
+                webrtc. 
+                ! application/x-rtp,media=audio,encoding-name=OPUS,payload=97
+                ! rtpopusdepay
+                ! opusdec
+                ! audioconvert
+                ! audioresample
+                ! alsasink sync=false
             """
 
             print("🔄 Creating WebRTC pipeline with VIDEO + AUDIO (Opus)...")
@@ -541,7 +336,7 @@ class WebRTCClient:
             # Signals
             self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
             self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
-
+            self.webrtc.connect('pad-added', self.on_incoming_stream)
             bus = self.pipe.get_bus()
             bus.add_signal_watch()
             bus.connect('message', self.on_bus_message)
@@ -553,6 +348,14 @@ class WebRTCClient:
             print(f"❌ Error creating pipeline: {e}")
             traceback.print_exc()
             return False
+
+    def on_incoming_stream(self, element, pad):
+        """Handle incoming audio stream from browser"""
+        caps = pad.get_current_caps()
+        if caps:
+            caps_str = caps.to_string()
+            if 'audio' in caps_str:
+                print("🎧 Incoming audio stream detected from browser")
 
     async def request_call(self):
         if not self.connected or not self.ws:
@@ -716,23 +519,21 @@ class WebRTCClient:
         print(f"\n📞 CALL ACCEPTED by operator: {operator_id}")
         self.peer_id = operator_id
         self.in_call = True
-        
-        # Switch to SCO/HFP profile for audio
-        print("🔄 Switching Bluetooth to SCO/HFP profile...")
+
+        # Switch to SCO/HFP for microphone capture (optional)
         if not self.bt_manager.switch_to_sco():
             print("⚠️ Warning: Failed to trigger SCO profile")
-        
+
         await asyncio.sleep(1.0)
-        
+
         # Create and start pipeline with audio+video
         if not self.pipe:
-            print("🔄 Creating pipeline for accepted call...")
             if not self.create_pipeline():
                 print("❌ Failed to create pipeline for call")
                 await self.stop_call()
                 return
-        
-        print("🎬 Starting audio+video stream...")
+
+        print("🎬 Starting WebRTC audio+video stream...")
         result = self.pipe.set_state(Gst.State.PLAYING)
         if result == Gst.StateChangeReturn.FAILURE:
             print("❌ Failed to start pipeline!")
