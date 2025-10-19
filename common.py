@@ -6,10 +6,40 @@ import logging
 import time
 import signal
 logging.basicConfig(level=logging.INFO)
+from enum import Enum,auto
 
+class SoundType(Enum):
+    ZERO = 0
+    ONE =1
+    TWO = 2
+    THREE = 3
+    FOUR = 4
+    FIVE = 5
+    MANY = 6
+    CALL_START = auto()
+    CALL_END = auto()
+    MUTED = auto()
+    UNMUTED = auto
+    PHOTOS_ARE_PROCESSING = auto()
+    GENERATED_AUDIO = auto()
+    RUN_OCR_CLIENT = auto()
+    TAKE_NEW_PHOTO_AND_ADD_TO_OCR = auto()
+    PLEASE_TRY_AGAIN_LATER = auto()
+    STOP_OCR = auto()
+    PROCESSING = auto()
+    CALLING = auto()
 
+class CallSignal(Enum):
+    START_CALL = auto()
+    END_CALL = auto()
+    MUTE_CALL = auto()
 
-
+class OCRSignal(Enum):
+    START_OCR = auto()
+    STOP_OCR = auto()
+    PAUSE_OCR = auto()
+    NEW_PICTURE = auto()
+    STOP_OCR_NOW = auto()
 class IPC:
     pid_file_location = "/tmp/.pid/"
     def __init__(self, filename):
@@ -79,3 +109,73 @@ class Logger:
 
     def log(self, msg):
         print(f"[{self.tag}] {msg}")
+        
+        
+class BluetoothProfileManager:
+    """Minimal manager for bluealsa + BlueZ flows"""
+    def __init__(self, bt_mac, settle=1.0):
+        self.bt_mac = bt_mac
+        self.current_profile = None
+        self.settle = settle
+
+    def _run(self, cmd, timeout=5):
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return p.returncode, p.stdout.strip(), p.stderr.strip()
+        except subprocess.TimeoutExpired:
+            return 1, "", "timeout"
+
+    def ensure_connected(self):
+        """Ensure device is connected via bluetoothctl"""
+        rc, out, err = self._run(["bluetoothctl", "info", self.bt_mac])
+        if rc != 0 or "Connected: yes" not in out:
+            rc, out, err = self._run(["bluetoothctl", "connect", self.bt_mac], timeout=10)
+            if rc == 0:
+                time.sleep(self.settle)
+                return True
+            return False
+        return True
+
+    def _reconnect(self):
+        """Disconnect then connect to force profile negotiation"""
+        self._run(["bluetoothctl", "disconnect", self.bt_mac], timeout=5)
+        time.sleep(0.5)
+        rc, out, err = self._run(["bluetoothctl", "connect", self.bt_mac], timeout=10)
+        time.sleep(self.settle)
+        return rc == 0
+
+    def switch_to_sco(self):
+        """Request reconnect for SCO/HFP"""
+        try:
+            print("🔄 Requesting reconnect for SCO/HFP...")
+            if not self.ensure_connected():
+                print("⚠ Device not connected; attempting connect")
+            ok = self._reconnect()
+            if ok:
+                self.current_profile = "sco"
+                print("✅ Reconnected; expect SCO devices available")
+                return True
+            else:
+                print("⚠ Failed to reconnect Bluetooth device")
+                return False
+        except Exception as e:
+            print(f"❌ Error switching to SCO: {e}")
+            return False
+
+    def switch_to_a2dp(self):
+        """Request reconnect for A2DP"""
+        try:
+            print("🔄 Requesting reconnect for A2DP...")
+            ok = self._reconnect()
+            if ok:
+                self.current_profile = "a2dp"
+                print("✅ Reconnected; expect A2DP devices available")
+                return True
+            else:
+                print("⚠ Failed to reconnect Bluetooth device")
+                return False
+        except Exception as e:
+            print(f"❌ Error switching to A2DP: {e}")
+            return False
+
+

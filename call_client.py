@@ -26,6 +26,8 @@ import traceback
 from dotenv import load_dotenv
 import time
 import threading
+from audio_feedback import AudioFeedback
+from common import SoundType,IPC
 
 load_dotenv()
 
@@ -37,6 +39,9 @@ BT_MAC = os.getenv("BT_MAC", "XX:XX:XX:XX:XX:XX")
 
 # Audio configuration
 AUDIO_CHUNK_SIZE = 4096  # Read in 4KB chunks for smooth streaming
+
+
+af = AudioFeedback(SoundType.CALLING)
 
 # Shared memory for external signals
 SHM_SIZE = 4
@@ -60,72 +65,6 @@ def bluealsa_dev_string(mac, profile):
     """Build bluealsa device string"""
     return f"bluealsa:DEV={mac},PROFILE={profile}"
 
-class BluetoothProfileManager:
-    """Minimal manager for bluealsa + BlueZ flows"""
-    def __init__(self, bt_mac, settle=1.0):
-        self.bt_mac = bt_mac
-        self.current_profile = None
-        self.settle = settle
-
-    def _run(self, cmd, timeout=5):
-        try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            return p.returncode, p.stdout.strip(), p.stderr.strip()
-        except subprocess.TimeoutExpired:
-            return 1, "", "timeout"
-
-    def ensure_connected(self):
-        """Ensure device is connected via bluetoothctl"""
-        rc, out, err = self._run(["bluetoothctl", "info", self.bt_mac])
-        if rc != 0 or "Connected: yes" not in out:
-            rc, out, err = self._run(["bluetoothctl", "connect", self.bt_mac], timeout=10)
-            if rc == 0:
-                time.sleep(self.settle)
-                return True
-            return False
-        return True
-
-    def _reconnect(self):
-        """Disconnect then connect to force profile negotiation"""
-        self._run(["bluetoothctl", "disconnect", self.bt_mac], timeout=5)
-        time.sleep(0.5)
-        rc, out, err = self._run(["bluetoothctl", "connect", self.bt_mac], timeout=10)
-        time.sleep(self.settle)
-        return rc == 0
-
-    def switch_to_sco(self):
-        """Request reconnect for SCO/HFP"""
-        try:
-            print("🔄 Requesting reconnect for SCO/HFP...")
-            if not self.ensure_connected():
-                print("⚠ Device not connected; attempting connect")
-            ok = self._reconnect()
-            if ok:
-                self.current_profile = "sco"
-                print("✅ Reconnected; expect SCO devices available")
-                return True
-            else:
-                print("⚠ Failed to reconnect Bluetooth device")
-                return False
-        except Exception as e:
-            print(f"❌ Error switching to SCO: {e}")
-            return False
-
-    def switch_to_a2dp(self):
-        """Request reconnect for A2DP"""
-        try:
-            print("🔄 Requesting reconnect for A2DP...")
-            ok = self._reconnect()
-            if ok:
-                self.current_profile = "a2dp"
-                print("✅ Reconnected; expect A2DP devices available")
-                return True
-            else:
-                print("⚠ Failed to reconnect Bluetooth device")
-                return False
-        except Exception as e:
-            print(f"❌ Error switching to A2DP: {e}")
-            return False
 
 class WebRTCClient:
     def __init__(self):
@@ -141,7 +80,6 @@ class WebRTCClient:
         self.in_call = False
         self.muted = False
         self.pipeline_playing = False
-        self.bt_manager = BluetoothProfileManager(BT_MAC)
 
         self.setup_shared_memory()
         self.setup_signal_handlers()
@@ -170,10 +108,11 @@ class WebRTCClient:
             action_code = struct.unpack('i', shm.buf[:4])[0]
             print(f"\n🔔 Signal received! Action code: {action_code}")
             if action_code == ACTION_REQUEST_CALL:
+                af.play(loop=True)
                 if self.loop and not self.in_call:
                     asyncio.run_coroutine_threadsafe(self.request_call(), self.loop)
             elif action_code == ACTION_STOP_CALL:
-                if self.loop and self.in_call:
+                if self.loop:
                     asyncio.run_coroutine_threadsafe(self.stop_call(), self.loop)
             elif action_code == ACTION_MUTE_UNMUTE:
                 if self.loop and self.in_call:
@@ -247,7 +186,6 @@ class WebRTCClient:
             self.cleanup_pipeline()
         
         # Switch back to A2DP
-        self.bt_manager.switch_to_a2dp()
         
         print("🔄 Creating fresh pipeline for next call...")
         if not self.create_pipeline():
@@ -369,6 +307,8 @@ class WebRTCClient:
 
     async def toggle_mute(self):
         """Toggle microphone mute"""
+        
+        
         self.muted = not self.muted
         print(f"🔇 Microphone {'MUTED' if self.muted else 'UNMUTED'}")
         
@@ -516,13 +456,12 @@ class WebRTCClient:
             print(f"❌ Error handling ICE candidate: {e}")
 
     async def handle_call_accepted(self, operator_id):
+        af.stop()
         print(f"\n📞 CALL ACCEPTED by operator: {operator_id}")
         self.peer_id = operator_id
         self.in_call = True
 
         # Switch to SCO/HFP for microphone capture (optional)
-        if not self.bt_manager.switch_to_sco():
-            print("⚠️ Warning: Failed to trigger SCO profile")
 
         await asyncio.sleep(1.0)
 
@@ -642,12 +581,6 @@ class WebRTCClient:
         self.peer_id = None
         
         self.cleanup_pipeline()
-        
-        # Switch back to A2DP profile if possible
-        try:
-            self.bt_manager.switch_to_a2dp()
-        except Exception:
-            pass
         
         if self.ws:
             try:

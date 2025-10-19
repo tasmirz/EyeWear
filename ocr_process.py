@@ -153,7 +153,7 @@ class OCRClient:
         
             #run command,
             filename =  f"/home/pi/EyeWear/captured_images/image_{timestamp}.jpg"
-            subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-on-capture', '--timeout', '2000', '--nopreview', '--verbose', '0'])
+            subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-on-capture', '--timeout', '2000', '--nopreview', '--verbose', '0','--vflip'])
             #subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-mode','continuous', '--timeout', '2000', '--nopreview', '--verbose', '0'])
             #wait for subprocess to complete
             # Capture image
@@ -420,8 +420,12 @@ class OCRClient:
 if __name__ == "__main__":
     try:
         ipc = IPC("ocr_process")
-        shm = SharedMemory(name="ocr_signal", create=True, size=4)
-        print("Shared memory created")
+        try:
+            shm = SharedMemory(name="ocr_signal", 
+                               create=True, size=4)
+        except FileExistsError:
+            shm = SharedMemory(name="ocr_signal", create=False, size=4)
+        print("Shared memory for OCR signals initialized.")
         client = OCRClient()
         client.run()
     except Exception as e:

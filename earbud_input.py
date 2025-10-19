@@ -34,11 +34,29 @@ import time
 import argparse
 from multiprocessing.shared_memory import SharedMemory
 import struct
-from common import IPC
+from common import IPC, CallSignal, OCRSignal,SoundType 
+from audio_feedback import AudioFeedbackManager
+
+
+afm = AudioFeedbackManager(
+    [SoundType.CALL_START,
+     SoundType.CALL_END, SoundType.MUTED,
+     SoundType.UNMUTED, 
+     SoundType.ZERO, SoundType.ONE, SoundType.TWO, SoundType.THREE, SoundType.FOUR, SoundType.FIVE, 
+     SoundType.MANY,
+     SoundType.PHOTOS_ARE_PROCESSING,
+     SoundType.GENERATED_AUDIO,
+     SoundType.RUN_OCR_CLIENT, 
+     SoundType.TAKE_NEW_PHOTO_AND_ADD_TO_OCR,
+     SoundType.PLEASE_TRY_AGAIN_LATER, 
+     SoundType.STOP_OCR])
 
 ipc = None
-#ocr_shm = SharedMemory(name="ocr_signal", create=False, size=4)
+muted=False
+ocr_shm = SharedMemory(name="ocr_signal", create=False, size=4)
 call_shm = SharedMemory(name="call_signal", create=False, size=4)
+oqc_shm = SharedMemory(name="ocr_queue_count", create=False, size=4)
+oqi_shm = SharedMemory(name="ocr_queue_images", create=False, size=4)
 
 def set_ipc(ipc_instance):
     global ipc
@@ -57,6 +75,8 @@ mode_of_operation = 'IDLE' , # can be IDLE, CALL, OCR
 def  getMode():
     return globals().get('mode_of_operation', 'IDLE')
 setMode = lambda mode: globals().update(mode_of_operation=mode)
+
+setMode("IDLE")
 
 
 mode_mapping = {
@@ -81,46 +101,104 @@ mode_mapping = {
 
 def run_ocr_client():
     setMode("OCR")
-    ocr_shm.buf[:4] = struct.pack('i', 1)  # signal OCR client
+    afm.play(SoundType.RUN_OCR_CLIENT, threaded=True)
+    ocr_shm.buf[:4] = struct.pack('i', OCRSignal.START_OCR.value)  # signal OCR client
     # send signal to OCR client process
     ipc.send_signal("ocr_process",signal.SIGUSR1)
     print("Running OCR client...")
 
 def call_client():
     setMode("CALL")
-    call_shm.buf[:4] = struct.pack('i', 1)  # signal call client
+    global muted
+    muted=False
+    afm.play(SoundType.CALL_START, threaded=True)
+    call_shm.buf[:4] = struct.pack('i', CallSignal.START_CALL.value)  # signal call client
     ipc.send_signal("call_client",signal.SIGUSR1)
     print("Calling client...")
 
 def hangup():
     print("Hanging up call...")
-    call_shm.buf[:4] = struct.pack('i', 2)  # signal hangup
+    afm.play(SoundType.CALL_END, threaded=True)
+    call_shm.buf[:4] = struct.pack('i', CallSignal.END_CALL.value)  # signal hangup
     ipc.send_signal("call_client",signal.SIGUSR1)
     setMode("IDLE")
 
 def mute_unmute():
-    call_shm.buf[:4] = struct.pack('i', 3)  # signal mute/unmute
+    global muted
+    muted = not muted
+    if muted:
+        afm.play(SoundType.MUTED, threaded=True)
+    else:
+        afm.play(SoundType.UNMUTED, threaded=True)
+    call_shm.buf[:4] = struct.pack('i', CallSignal.MUTE_CALL.value)  # signal mute/unmute
     ipc.send_signal("call_client",signal.SIGUSR1)
     print("Toggling mute/unmute...")
 
 def take_new_photo_and_ocr_client_to_queue():
-    ocr_shm.buf[:4] = struct.pack('i', 3)  # signal take new photo and OCR
+    afm.play(SoundType.TAKE_NEW_PHOTO_AND_ADD_TO_OCR, threaded=True)
+    ocr_shm.buf[:4] = struct.pack('i', OCRSignal.NEW_PICTURE.value)  # signal take new photo and OCR
     ipc.send_signal("ocr_process",signal.SIGUSR1)
     print("Taking new photo and sending to OCR client queue...")
 
 def stop_ocr():
-    ocr_shm.buf[:4] = struct.pack('i', 2)  # signal stop OCR
+    ocr_shm.buf[:4] = struct.pack('i', OCRSignal.STOP_OCR.value)  # signal stop OCR
     ipc.send_signal("ocr_process",signal.SIGUSR1)
-    print("Stopping OCR...")
-    setMode("IDLE")
+        
 
 def pause_ocr():
-    ocr_shm.buf[:4] = struct.pack('i', 4)  # signal pause OCR
+    afm.play(SoundType.PAUSE_OCR, threaded=True)
+    ocr_shm.buf[:4] = struct.pack('i', OCRSignal.PAUSE_OCR.value)  # signal pause OCR
     ipc.send_signal("ocr_process",signal.SIGUSR1)
     print("Pausing OCR...")
 
 
+def ocr_queue_feedback(): # must be registered as a signal handler
+    count = struct.unpack('i', oqc_shm.buf[:4])[0]
+    print(f"OCR Queue Count: {count}")
+    if count == 0:
+        afm.play(SoundType.STOP_OCR, threaded=True)
+        setMode("IDLE")
+        print("Stopping OCR...")
+        ocr_shm.buf[:4] = struct.pack('i', OCRSignal.STOP_OCR_NOW.value)  # signal stop OCR now
+        ipc.send_signal("ocr_process",signal.SIGUSR1)
+    else:
+        # audio feedback -> how many audio in queue
+        audio_count = struct.unpack('i', oqi_shm.buf[:4])[0]
+        print(f"OCR Queue Images: {audio_count}")
+        
 
+def ocr_mute_feedback(): # must be registered as a signal handler
+    print("OCR Mute/Unmute feedback received.")
+    queue_count = struct.unpack('i', oqc_shm.buf[:4])[0]
+    queue_count_images = struct.unpack('i', oqi_shm.buf[:4])[0]
+    print(f"Playing sound for OCR Queue Count: {queue_count}")
+    print(f"OCR Queue Images for Mute/Unmute: {queue_count_images}")
+
+    if (queue_count>=6):
+        afm.sequential_play([
+            SoundType.MANY,
+            SoundType.GENERATED_AUDIO], 
+                            threaded=False)
+    elif (queue_count==0):
+        pass
+    else:
+        afm.sequential_play([
+            SoundType(queue_count),
+            SoundType.GENERATED_AUDIO                                                                                   
+            ], threaded=False)                                                                                                                       
+    if (queue_count_images >=6):
+        afm.sequential_play([
+            SoundType.MANY,
+            SoundType.PHOTOS_ARE_PROCESSING], 
+                            threaded=True)
+    elif (queue_count_images==0):
+        pass
+    else:
+        afm.sequential_play([
+            SoundType(queue_count_images),
+            SoundType.PHOTOS_ARE_PROCESSING                                                                                   
+            ], threaded=True)
+        
 fn_mapping = {
     "roc": run_ocr_client,
     "cc": call_client,
@@ -193,6 +271,8 @@ def shared_memory_cleanup():
 if __name__ == "__main__":
     try:
         ipc = IPC("earbud_input_signal")
+        signal.signal(signal.SIGUSR1, ocr_queue_feedback)
+        signal.siginterrupt(signal.SIGUSR2, ocr_mute_feedback)
         device = find_bluetooth_device()
         if device:
             read_button_events(device)
