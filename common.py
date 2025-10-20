@@ -29,6 +29,7 @@ class SoundType(Enum):
     STOP_OCR = 16
     PROCESSING = 17
     CALLING = 18
+    IM_TAKING_DONE=19
 
 class CallSignal(Enum):
     START_CALL = auto()
@@ -189,5 +190,22 @@ class BluetoothProfileManager:
         except Exception as e:
             print(f"❌ Error switching to A2DP: {e}")
             return False
+        
+def  getMode():
+    # read file /tmp/.mode_of_operation/mode.txt
+    mode_file = "/tmp/.mode_of_operation/mode.txt"
+    try:
+        with open(mode_file, "r") as f:
+            mode = f.read().strip()
+            return mode
+    except FileNotFoundError:
+        return "IDLE"
+def setMode(mode):
+    mode_file = "/tmp/.mode_of_operation/mode.txt"
+    # create directory if not exists
+    os.makedirs(os.path.dirname(mode_file), exist_ok=True)
+    with open(mode_file, "w") as f:
+        f.write(mode)
+
 
 

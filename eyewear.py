@@ -93,16 +93,16 @@ def main():
     stop_event = multiprocessing.Event()
     
     # main -> start ocr process,call client and input feeder
-    #ocr_process = multiprocessing.Process(target=run_program, args=(["python3", "ocr_process.py"],stop_event))
+    ocr_process = multiprocessing.Process(target=run_program, args=(["python3", "ocr_process.py"],stop_event))
     call_client_process = multiprocessing.Process(target=run_program, args=(["python3", "call_client.py"],stop_event))
-    #input_feeder_process = multiprocessing.Process(target=run_program, args=(["python3", "earbud_input.py"],stop_event))
+    input_feeder_process = multiprocessing.Process(target=run_program, args=(["python3", "earbud_input.py"],stop_event))
 
     
     # start processes
-    #ocr_process.start()
+    ocr_process.start()
     call_client_process.start()
     time.sleep(2)  # slight delay to ensure proper startup sequence
-    #input_feeder_process.start()
+    input_feeder_process.start()
     
     # if one process ends, terminate all, without while True loop
     stop_event.wait()
@@ -114,7 +114,7 @@ def main():
 
 
     # wait for signals
-    #ocr_process.join()
+    ocr_process.join()
     call_client_process.join()
     input_feeder_process.join()    
     

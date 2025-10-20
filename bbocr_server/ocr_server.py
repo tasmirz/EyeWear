@@ -119,13 +119,13 @@ def output_consumer():
                 output_speech = output.get('output_speech')
                 output_html = output.get('output_html')
                 # delete input file, output_html if exists
-                try:
-                    if input_file and os.path.exists(input_file):
-                        os.remove(input_file)
-                    if output_html and os.path.exists(output_html):
-                        os.remove(output_html)
-                except Exception as e:
-                    print(f"Error deleting temp files: {e}")
+                # try:
+                #     if input_file and os.path.exists(input_file):
+                #         os.remove(input_file)
+                #     if output_html and os.path.exists(output_html):
+                #         os.remove(output_html)
+                # except Exception as e:
+                #     print(f"Error deleting temp files: {e}")
 
 
                 # Try to determine uuid. Prefer explicit uuid key if provided by pipeline.
@@ -349,6 +349,13 @@ def upload_image():
             image_file.save(temp_image_path)
             print(f"Saved image to: {temp_image_path}")
 
+
+            # rotate image 180 deg
+            import cv2
+            image=cv2.imread(temp_image_path)
+            rotated_image = cv2.rotate(image, cv2.ROTATE_180)
+            cv2.imwrite(temp_image_path, rotated_image)
+            
             # Enqueue job dict to OCR pipeline
             if ocr_input_queue is None:
                 return jsonify({"error": "OCR pipeline not available"}), 503
@@ -376,14 +383,15 @@ def upload_image():
 
         except Exception as e:
             # Cleanup on error
-            try:
-                if os.path.exists(temp_image_path):
-                    os.remove(temp_image_path)
-                if os.path.exists(temp_dir):
-                    os.rmdir(temp_dir)
-            except:
-                pass
-            raise e
+            # try:
+            #     if os.path.exists(temp_image_path):
+            #         os.remove(temp_image_path)
+            #     if os.path.exists(temp_dir):
+            #         os.rmdir(temp_dir)
+            # except:
+            #     pass
+            # raise e
+            pass
         
     except Exception as e:
         print(f"Upload error: {e}")
@@ -488,7 +496,7 @@ def get_result(uuid_key):
             try:
                 # Remove audio file
                 if os.path.exists(res_path):
-                    os.remove(res_path)
+                    #os.remove(res_path)
                     print(f"Deleted audio file: {res_path}")
 
                 # Remove temp image and dir if present
@@ -501,10 +509,11 @@ def get_result(uuid_key):
                     td = pending_local.get('temp_dir')
                     try:
                         if img and os.path.exists(img):
-                            os.remove(img)
+                            #os.remove(img)
                             print(f"Deleted temp image: {img}")
                         if td and os.path.exists(td):
-                            os.rmdir(td)
+                            #os.rmdir(td)
+                            pass
                     except Exception as e:
                         print(f"Cleanup result error: {e}")
             except Exception as e:

@@ -3,9 +3,10 @@ import os
 #os.environ['SDL_AUDIODRIVER'] = 'dummy'
 
 import multiprocessing.shared_memory as shm
-from time import time
+import time
 from common import SoundType
 import threading
+import vlc
 
 # load audio files, dict
 audio_files = {
@@ -28,104 +29,77 @@ audio_files = {
     SoundType.STOP_OCR: 'assets/stop_ocr.wav',
     SoundType.CALLING: 'assets/call.wav',
     SoundType.PROCESSING: 'assets/processing.wav',
+    SoundType.IM_TAKING_DONE: 'assets/pcpw.mp3',
+    
     }
+class AudioFeedback:
+    def __init__(self, key):
+        self.key = key
+        self.file_path = audio_files[key]
+        self.player = None
+        self.is_playing = False
+        self._loop = False
 
-import subprocess
-import threading
-import time
+    def _play(self):
+        print(f"🔊 Playing sound: {self.key}")
+        instance = vlc.Instance("--no-xlib", "--quiet", "--no-video", "--intf", "dummy")
+        self.player = instance.media_player_new()
+        media = instance.media_new(self.file_path)
+        self.player.set_media(media)
 
+        self.player.play()
+        self.is_playing = True
 
-# class AudioFeedback:
-#     def __init__(self, key):
-#         self.key = key
-#         self.file_path = audio_files[key]
-#         self.process = None
-#         self.is_playing = False
-#         self._paused = False
+        # Wait for playback to start
+        time.sleep(0.1)
 
-#     def _play(self, loop=False):
-#         cmd = [
-#             "ffplay",
-#             "-nodisp",  # no video
-#             "-autoexit",  # exit after file finishes
-#             "-hide_banner",
-#             "-loglevel", "quiet",
-#             self.file_path
-#         ]
-#         while self.is_playing:
-#             self.process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-#             self.process.wait()
-#             if not loop:
-#                 break
+        # Handle looping
+        while self.is_playing:
+            state = self.player.get_state()
+            if state in (vlc.State.Ended, vlc.State.Stopped, vlc.State.Error):
+                if self._loop:
+                    self.player.stop()
+                    self.player.play()
+                else:
+                    break
+            time.sleep(0.1)
+        self.is_playing = False
 
-#     def play(self, loop=False, threaded=True):
-#         if self.is_playing:
-#             return  # already playing
-#         self.is_playing = True
-#         self._paused = False
-#         if threaded:
-#             self._thread = threading.Thread(target=self._play, args=(loop,), daemon=True)
-#             self._thread.start()
-#         else:
-#             self._play(loop)
+    def play(self, loop=False, threaded=True):
+        if self.is_playing:
+            return
+        self._loop = loop
+        if threaded:
+            self._thread = threading.Thread(target=self._play, daemon=True)
+            self._thread.start()
+        else:
+            self._play()
 
-#     def pause(self):
-#         if self.process and self.is_playing and not self._paused:
-#             # Sending 'p' to ffplay toggles pause
-#             self.process.stdin.write(b"p")
-#             self.process.stdin.flush()
-#             self._paused = True
-
-#     def resume(self):
-#         if self.process and self.is_playing and self._paused:
-#             self.process.stdin.write(b"p")
-#             self.process.stdin.flush()
-#             self._paused = False
-
-#     def stop(self):
-#         if self.process and self.is_playing:
-#             self.is_playing = False
-#             if self.process.poll() is None:
-#                 self.process.terminate()
-#             if hasattr(self, "_thread") and self._thread.is_alive():
-#                 self._thread.join(timeout=0.1)
-#             self._paused = False
+    def stop(self):
+        if self.player and self.is_playing:
+            self.is_playing = False
+            self.player.stop()
+            if hasattr(self, "_thread") and self._thread.is_alive():
+                self._thread.join(timeout=0.1)
 
 
-# class AudioFeedbackManager:
-#     def __init__(self, arr):
-#         self.audio_feedbacks = {key: AudioFeedback(key) for key in arr}
+class AudioFeedbackManager:
+    def __init__(self, arr):
+        self.audio_feedbacks = {key: AudioFeedback(key) for key in arr}
 
-#     def play(self, key, loop=False, threaded=True):
-#         self.audio_feedbacks[key].play(loop=loop, threaded=threaded)
+    def play(self, key, loop=False, threaded=True):
+        self.audio_feedbacks[key].play(loop=loop, threaded=threaded)
 
-#     def pause(self, key):
-#         self.audio_feedbacks[key].pause()
+    def stop(self, key):
+        self.audio_feedbacks[key].stop()
 
-#     def resume(self, key):
-#         self.audio_feedbacks[key].resume()
+    def sequential_play(self, keys, threaded=False):
+        def _sequential_play_threaded(keys_list):
+            for key in keys_list:
+                self.play(key, threaded=False)
 
-#     def stop(self, key):
-#         self.audio_feedbacks[key].stop()
-
-#     def sequential_play(self, keys, threaded=False):
-#         def _sequential_play_threaded(keys_list):
-#             for key in keys_list:
-#                 self.play(key, threaded=False)
-
-#         if not threaded:
-#             for key in keys:
-#                 self.play(key, threaded=False)
-#         else:
-#             threading.Thread(target=_sequential_play_threaded, args=(keys,), daemon=True).start()
-
-
-# # Example usage:
-# # manager = AudioFeedbackManager(["beep", "alert"])
-# # manager.play("beep", loop=True, threaded=True)
-# # time.sleep(2)
-# # manager.pause("beep")
-# # time.sleep(2)
-# # manager.resume("beep")
-# # time.sleep(2)
-# # manager.stop("beep")
+        if not threaded:
+            for key in keys:
+                self.play(key, threaded=False)
+        else:
+            threading.Thread(target=_sequential_play_threaded, args=(keys,), daemon=True).start()

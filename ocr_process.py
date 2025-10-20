@@ -15,13 +15,17 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 from picamera2 import Picamera2
 from dotenv import load_dotenv
-import pygame
+
 import subprocess
-from common import IPC
+from common import IPC, SoundType
 from gtts import gTTS
 from common import OCRSignal
+from audio_feedback import AudioFeedbackManager
 
-os.environ['SDL_AUDIODRIVER'] = 'dummy'
+afm = AudioFeedbackManager([
+    SoundType.IM_TAKING_DONE,
+])
+
 TAGNAME = "ocr_process"
 logging.basicConfig(
     format=f"[{TAGNAME}] %(message)s",
@@ -29,6 +33,35 @@ logging.basicConfig(
 )
 logging.info("Starting OCR")
 
+
+import vlc
+class VLCPlayer:
+    def __init__(self, media_path: str):
+        """Initialize VLC player with a media file path."""
+        self.instance = vlc.Instance()
+        self.player = self.instance.media_player_new()
+        media = self.instance.media_new(media_path)
+        self.player.set_media(media)
+
+    def play(self):
+        """Start or resume playback."""
+        self.player.play()
+
+    def pause(self):
+        """Pause playback."""
+        self.player.pause()
+
+    def resume(self):
+        """Resume playback (same as play if paused)."""
+        state = self.player.get_state()
+        if state == vlc.State.Paused:
+            self.player.pause()  # toggle pause to resume
+        elif state not in [vlc.State.Playing, vlc.State.Buffering]:
+            self.player.play()
+
+    def stop(self):
+        """Stop playback."""
+        self.player.stop()
 
 ipc = None
 shm= None
@@ -62,7 +95,7 @@ class OCRClient:
         self.load_keys()
         
         # Initialize pygame mixer for audio playback
-        pygame.mixer.init()
+        global player
         
         # Threads
         self.upload_thread = None
@@ -161,10 +194,13 @@ class OCRClient:
         
             #run command,
             filename =  f"/home/pi/EyeWear/captured_images/image_{timestamp}.jpg"
-            subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-on-capture', '--timeout', '2000', '--nopreview', '--verbose', '0','--vflip'])
-            #subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-mode','continuous', '--timeout', '2000', '--nopreview', '--verbose', '0'])
+            #subprocess.run(['rpicam-still', '-o', str(filename), '-q', '60', '--autofocus-on-capture', '--timeout', '5000', '--nopreview', '--verbose', '0','--vflip','--hflip'])
+            #subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-on-capture', '--timeout', '5000', '--nopreview', '--verbose', '0'])
+            #subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90',])
+            subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-mode','continuous', '--timeout', '2000', '--nopreview'])
             #wait for subprocess to complete
             # Capture image
+            afm.play(SoundType.IM_TAKING_DONE)
             logging.info(f"Captured image: {filename}")
             
             # Enqueue image path
@@ -321,16 +357,20 @@ class OCRClient:
                 logging.info(f"Playing audio: {audio_path}")
                 
                 # Play audio
-                pygame.mixer.music.load(audio_path)
-                pygame.mixer.music.play()
+                #pygame.mixer.music.load(audio_path)
+                #pygame.mixer.music.play()
+                
+                player = VLCPlayer(audio_path)
+                player.play()
                 
                 # Wait for playback to finish
-                while pygame.mixer.music.get_busy() and self.running and not self.paused:
+                while player.is_playing() and self.running and not self.paused:
                     time.sleep(0.1)
                 
                 # Stop if paused
                 if self.paused:
-                    pygame.mixer.music.stop()
+                    #pygame.mixer.music.stop()
+                    player.stop()
                     # Put audio back in queue
                     self.audio_queue.put(audio_path)
                     continue
@@ -369,7 +409,8 @@ class OCRClient:
             self.playback_thread.join(timeout=5)
         
         # Stop audio playback
-        pygame.mixer.music.stop()
+        player.stop()
+       # pygame.mixer.music.stop()
         
         
     logging.info("OCR Client stopped")
@@ -379,10 +420,12 @@ class OCRClient:
         self.paused = not self.paused
         if self.paused:
             logging.info("Playback paused")
-            pygame.mixer.music.pause()
+            #pygame.mixer.music.pause()
+            player.pause()
         else:
             logging.info("Playback resumed")
-            pygame.mixer.music.unpause()
+            #pygame.mixer.music.unpause()
+            player.resume()
 
     def signal_handler(self, signum, frame):
         """Handle signals from shared memory"""
@@ -435,7 +478,7 @@ if __name__ == "__main__":
             
         logging.info("Shared memory for OCR signals initialized.")
         client = OCRClient()
-        #client.run()
+        client.run()
     except Exception as e:
         logging.exception(f"Fatal error: {e}")
     finally:
