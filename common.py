@@ -2,6 +2,7 @@
 from fileinput import filename
 import os
 import atexit
+import subprocess
 import logging
 import time
 import signal
@@ -16,18 +17,18 @@ class SoundType(Enum):
     FOUR = 4
     FIVE = 5
     MANY = 6
-    CALL_START = auto()
-    CALL_END = auto()
-    MUTED = auto()
-    UNMUTED = auto
-    PHOTOS_ARE_PROCESSING = auto()
-    GENERATED_AUDIO = auto()
-    RUN_OCR_CLIENT = auto()
-    TAKE_NEW_PHOTO_AND_ADD_TO_OCR = auto()
-    PLEASE_TRY_AGAIN_LATER = auto()
-    STOP_OCR = auto()
-    PROCESSING = auto()
-    CALLING = auto()
+    CALL_START = 7
+    CALL_END = 8
+    MUTED = 9
+    UNMUTED = 10
+    PHOTOS_ARE_PROCESSING = 11
+    GENERATED_AUDIO = 12
+    RUN_OCR_CLIENT = 13
+    TAKE_NEW_PHOTO_AND_ADD_TO_OCR = 14
+    PLEASE_TRY_AGAIN_LATER = 15
+    STOP_OCR = 16
+    PROCESSING = 17
+    CALLING = 18
 
 class CallSignal(Enum):
     START_CALL = auto()
@@ -102,13 +103,6 @@ class IPC:
             os.remove(self.pidfile)
             logging.info(f"Removed PID file {self.pidfile}.")
 
-class Logger:
-    def __init__(self, tag):
-        self.tag = tag
-        logging.basicConfig(level=logging.INFO)
-
-    def log(self, msg):
-        print(f"[{self.tag}] {msg}")
         
         
 class BluetoothProfileManager:
@@ -124,7 +118,25 @@ class BluetoothProfileManager:
             return p.returncode, p.stdout.strip(), p.stderr.strip()
         except subprocess.TimeoutExpired:
             return 1, "", "timeout"
-
+    def connect(self):
+        """Connect to device via bluetoothctl"""
+        rc, out, err = self._run(["bluetoothctl", "connect", self.bt_mac], timeout=10)
+        if rc == 0:
+            time.sleep(self.settle)
+            return True
+        return False
+    def disconnect(self):
+        """Disconnect device via bluetoothctl"""
+        rc, out, err = self._run(["bluetoothctl", "disconnect", self.bt_mac], timeout=5)
+        if rc == 0:
+            time.sleep(self.settle)
+            return True
+        return False
+    def is_connected(self):
+        """Check if device is connected via bluetoothctl"""
+        rc, out, err = self._run(["bluetoothctl", "info", self.bt_mac])
+        return rc == 0 and "Connected: yes" in out
+    
     def ensure_connected(self):
         """Ensure device is connected via bluetoothctl"""
         rc, out, err = self._run(["bluetoothctl", "info", self.bt_mac])

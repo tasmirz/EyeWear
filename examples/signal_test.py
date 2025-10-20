@@ -23,5 +23,4 @@ if __name__ == "__main__":
         print(f"Error: {e}")
     finally:
         shm.close()
-        shm.unlink()
         ipc.cleanup()

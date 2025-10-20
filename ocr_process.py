@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 import signal
@@ -18,6 +19,16 @@ import pygame
 import subprocess
 from common import IPC
 from gtts import gTTS
+from common import OCRSignal
+
+os.environ['SDL_AUDIODRIVER'] = 'dummy'
+TAGNAME = "ocr_process"
+logging.basicConfig(
+    format=f"[{TAGNAME}] %(message)s",
+    level=logging.INFO
+)
+logging.info("Starting OCR")
+
 
 ipc = None
 shm= None
@@ -49,9 +60,6 @@ class OCRClient:
         
         # Load keys
         self.load_keys()
-        
-        # Initialize camera
-        self.camera = None
         
         # Initialize pygame mixer for audio playback
         pygame.mixer.init()
@@ -101,7 +109,7 @@ class OCRClient:
     def authenticate(self):
         """Perform authentication flow"""
         try:
-            print("Starting authentication...")
+            logging.info("Starting authentication...")
             
             # Step 1: Get challenge
             public_key_pem = self.get_public_key_pem()
@@ -116,7 +124,7 @@ class OCRClient:
             challenge_jwt = challenge_data.get('jwt')
             challenge_text = challenge_data.get('text')
             
-            print(f"Received challenge: {challenge_text}")
+            logging.info(f"Received challenge: {challenge_text}")
             
             # Step 2: Sign the challenge text
             signed_text = self.sign_text(challenge_text)
@@ -135,11 +143,11 @@ class OCRClient:
             auth_data = response.json()
             self.jwt_token = auth_data.get('jwt')
             
-            print("Authentication successful!")
+            logging.info("Authentication successful!")
             return True
             
         except Exception as e:
-            print(f"Authentication failed: {e}")
+            logging.error(f"Authentication failed: {e}")
             return False
     
     def capture_image(self):
@@ -147,7 +155,7 @@ class OCRClient:
             # Generate filename
         try:
 
-            print("Capturing image...")
+            logging.info("Capturing image...")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = self.image_dir / f"_image_{timestamp}.jpg"
         
@@ -157,17 +165,17 @@ class OCRClient:
             #subprocess.run(['rpicam-still', '-o', str(filename), '-q', '90', '--autofocus-mode','continuous', '--timeout', '2000', '--nopreview', '--verbose', '0'])
             #wait for subprocess to complete
             # Capture image
-            print(f"Captured image: {filename}")
+            logging.info(f"Captured image: {filename}")
             
             # Enqueue image path
             self.image_queue.put(str(filename))
             
         except Exception as e:
-            print(f"Image capture failed: {e}")
+            logging.error(f"Image capture failed: {e}")
     
     def upload_worker(self):
         """Worker thread to upload images continuously"""
-        print("Upload worker started")
+        logging.info("Upload worker started")
         while self.running:
             try:
                 # Get image from queue (non-blocking with timeout)
@@ -176,11 +184,11 @@ class OCRClient:
                 except queue.Empty:
                     continue
                 
-                print(f"Uploading image: {image_path}")
+                logging.info(f"Uploading image: {image_path}")
                 
                 # Ensure we have valid JWT
                 if not self.jwt_token:
-                    print("No JWT token, re-authenticating...")
+                    logging.info("No JWT token, re-authenticating...")
                     if not self.authenticate():
                         # Put image back in queue
                         self.image_queue.put(image_path)
@@ -226,7 +234,7 @@ class OCRClient:
                         try:
                             poll_resp = requests.get(poll_url, headers=headers, timeout=30, stream=True)
                         except requests.exceptions.RequestException as e:
-                            print(f"Polling error: {e}")
+                            logging.warning(f"Polling error: {e}")
                             time.sleep(1)
                             elapsed += 1
                             continue
@@ -240,31 +248,35 @@ class OCRClient:
                             # Received plain text response
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                             audio_filename = self.audio_dir / f"audio_{timestamp}.mp3"
-                            print(poll_resp)
-                            print(poll_resp.json())
-                            print(poll_resp.json()["text"])
+                            logging.debug(f"Poll response object: {poll_resp}")
+                            try:
+                                resp_json = poll_resp.json()
+                                logging.debug(f"Poll response json: {resp_json}")
+                                logging.debug(f"Poll response text: {resp_json.get('text')}")
+                            except Exception:
+                                resp_json = None
 
-                            tts = gTTS(text=poll_resp.json()["text"], lang='bn')
+                            tts = gTTS(text=resp_json.get("text") if resp_json else "", lang='bn')
                             tts.save(audio_filename)
 
                             got_audio = True
-                            print(f"Received plain text file: {audio_filename}")
+                            logging.info(f"Received plain text file: {audio_filename}")
                             break
                         elif poll_resp.status_code == 404:
-                            print(f"Result not found for uuid {req_uuid}")
+                            logging.warning(f"Result not found for uuid {req_uuid}")
                             break
                         elif poll_resp.status_code == 401:
                             # JWT expired or invalid: re-auth and retry upload
-                            print("Unauthorized when polling, re-authenticating")
+                            logging.warning("Unauthorized when polling, re-authenticating")
                             self.jwt_token = None
                             break
                         else:
-                            print(f"Unexpected poll response {poll_resp.status_code}: {poll_resp.text}")
+                            logging.warning(f"Unexpected poll response {poll_resp.status_code}: {poll_resp.text}")
                             break
 
                     if not got_audio:
                         # Put image back in queue for retry or drop
-                        print(f"Failed to get audio for uuid {req_uuid} within timeout")
+                        logging.warning(f"Failed to get audio for uuid {req_uuid} within timeout")
                         self.image_queue.put(image_path)
                         time.sleep(1)
                         continue
@@ -273,20 +285,20 @@ class OCRClient:
                 if audio_filename and os.path.exists(audio_filename):
                     try:
                         os.remove(image_path)
-                        print(f"Deleted image: {image_path}")
+                        logging.info(f"Deleted image: {image_path}")
                     except Exception as e:
-                        print(f"Failed to delete image {image_path}: {e}")
+                        logging.warning(f"Failed to delete image {image_path}: {e}")
 
                     # Enqueue audio file
                     self.audio_queue.put(str(audio_filename))
                 
             except requests.exceptions.RequestException as e:
-                print(f"Upload failed: {e}")
+                logging.error(f"Upload failed: {e}")
                 # Put image back in queue
                 self.image_queue.put(image_path)
                 time.sleep(5)
             except Exception as e:
-                print(f"Upload worker error: {e}")
+                logging.exception(f"Upload worker error: {e}")
                 time.sleep(1)
     
     def playback_worker(self):
@@ -306,7 +318,7 @@ class OCRClient:
                 if not self.running:
                     break
                 
-                print(f"Playing audio: {audio_path}")
+                logging.info(f"Playing audio: {audio_path}")
                 
                 # Play audio
                 pygame.mixer.music.load(audio_path)
@@ -326,28 +338,28 @@ class OCRClient:
                 # Delete audio file after playback
                 if self.running:
                     os.remove(audio_path)
-                    print(f"Deleted audio: {audio_path}")
+                    logging.info(f"Deleted audio: {audio_path}")
                 
             except Exception as e:
-                print(f"Playback worker error: {e}")
+                logging.exception(f"Playback worker error: {e}")
                 time.sleep(1)
     
     def start(self):
         """Start the OCR client"""
         if self.running:
-            print("Client already running")
+            logging.info("Client already running")
             return
         
-        print("Starting OCR Client...")
+        logging.info("Starting OCR Client...")
         
         # Authenticate
         
-        print("OCR Client started successfully")
+        logging.info("OCR Client started successfully")
         self.capture_image()  # Capture initial image
     
     def stop(self):
         """Stop the OCR client"""
-        print("Stopping OCR Client...")
+        logging.info("Stopping OCR Client...")
         self.running = False
         
         # Wait for threads to finish
@@ -359,47 +371,42 @@ class OCRClient:
         # Stop audio playback
         pygame.mixer.music.stop()
         
-        # Cleanup camera
-        if self.camera:
-            self.camera.stop()
-            self.camera.close()
-            self.camera = None
         
-        print("OCR Client stopped")
+    logging.info("OCR Client stopped")
     
     def toggle_pause(self):
         """Toggle play/pause state"""
         self.paused = not self.paused
         if self.paused:
-            print("Playback paused")
+            logging.info("Playback paused")
             pygame.mixer.music.pause()
         else:
-            print("Playback resumed")
+            logging.info("Playback resumed")
             pygame.mixer.music.unpause()
-    
+
     def signal_handler(self, signum, frame):
         """Handle signals from shared memory"""
         action_code = struct.unpack('i', shm.buf[:4])[0]
-        print(f"Action code from shared memory: {action_code}")
+        logging.debug(f"Action code from shared memory: {action_code}")
         
-        if action_code == 1:
-            print("Starting OCR Client")
+        if action_code == OCRSignal.START_OCR.value:
+            logging.info("Starting OCR Client")
             self.start()
-        elif action_code == 2:
-            print("Stopping OCR Client")
+        elif action_code == OCRSignal.STOP_OCR.value:
+            logging.info("Stopping OCR Client")
             self.stop()
-        elif action_code == 3:
-            print("Add another image")
+        elif action_code == OCRSignal.NEW_PICTURE.value:
+            logging.info("Add another image")
             self.capture_image()
-        elif action_code == 4:
-            print("Play/Pause")
+        elif action_code == OCRSignal.PAUSE_OCR.value:
+            logging.info("Play/Pause")
             self.toggle_pause()
     
     def run(self):
         """Main run loop"""
-        print("OCR Client initialized. Waiting for signals...")
+        logging.info("OCR Client initialized. Waiting for signals...")
         if not self.authenticate():
-            print("Failed to authenticate. Exiting.")
+            logging.error("Failed to authenticate. Exiting.")
             return
         
         self.running = True
@@ -414,7 +421,7 @@ class OCRClient:
             while True:
                 signal.pause()  # Wait for signals
         except KeyboardInterrupt:
-            print("\nShutting down...")
+            logging.info("\nShutting down...")
             self.stop()
 
 if __name__ == "__main__":
@@ -425,15 +432,15 @@ if __name__ == "__main__":
                                create=True, size=4)
         except FileExistsError:
             shm = SharedMemory(name="ocr_signal", create=False, size=4)
-        print("Shared memory for OCR signals initialized.")
+            
+        logging.info("Shared memory for OCR signals initialized.")
         client = OCRClient()
-        client.run()
+        #client.run()
     except Exception as e:
-        print(f"Fatal error: {e}")
+        logging.exception(f"Fatal error: {e}")
     finally:
         try:
             ipc.cleanup()
-            shm.unlink()
             shm.close()
 
         except:

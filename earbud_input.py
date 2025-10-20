@@ -26,6 +26,19 @@ mode of operation:
 
 """
 
+
+import logging
+
+
+TAGNAME = "earbud_input"
+
+logging.basicConfig(
+    format=f"[{TAGNAME}] %(message)s",
+    level=logging.INFO
+)
+
+logger = logging.getLogger(TAGNAME)
+
 import signal
 import evdev
 from evdev import categorize, ecodes
@@ -35,21 +48,8 @@ import argparse
 from multiprocessing.shared_memory import SharedMemory
 import struct
 from common import IPC, CallSignal, OCRSignal,SoundType 
-from audio_feedback import AudioFeedbackManager
+#from audio_feedback import AudioFeedbackManager
 
-
-afm = AudioFeedbackManager(
-    [SoundType.CALL_START,
-     SoundType.CALL_END, SoundType.MUTED,
-     SoundType.UNMUTED, 
-     SoundType.ZERO, SoundType.ONE, SoundType.TWO, SoundType.THREE, SoundType.FOUR, SoundType.FIVE, 
-     SoundType.MANY,
-     SoundType.PHOTOS_ARE_PROCESSING,
-     SoundType.GENERATED_AUDIO,
-     SoundType.RUN_OCR_CLIENT, 
-     SoundType.TAKE_NEW_PHOTO_AND_ADD_TO_OCR,
-     SoundType.PLEASE_TRY_AGAIN_LATER, 
-     SoundType.STOP_OCR])
 
 ipc = None
 muted=False
@@ -71,7 +71,7 @@ button_map = {
     165: "SINGLE_TAP"    # previoussong
 }
 
-mode_of_operation = 'IDLE' , # can be IDLE, CALL, OCR
+mode_of_operation = 'IDLE' # can be IDLE, CALL, OCR
 def  getMode():
     return globals().get('mode_of_operation', 'IDLE')
 setMode = lambda mode: globals().update(mode_of_operation=mode)
@@ -101,24 +101,24 @@ mode_mapping = {
 
 def run_ocr_client():
     setMode("OCR")
-    afm.play(SoundType.RUN_OCR_CLIENT, threaded=True)
+    #afm.play(SoundType.RUN_OCR_CLIENT, threaded=False)
     ocr_shm.buf[:4] = struct.pack('i', OCRSignal.START_OCR.value)  # signal OCR client
     # send signal to OCR client process
     ipc.send_signal("ocr_process",signal.SIGUSR1)
-    print("Running OCR client...")
+    logger.info("Running OCR client...")
 
 def call_client():
     setMode("CALL")
     global muted
     muted=False
-    afm.play(SoundType.CALL_START, threaded=True)
+    #afm.play(SoundType.CALL_START, threaded=False)
     call_shm.buf[:4] = struct.pack('i', CallSignal.START_CALL.value)  # signal call client
     ipc.send_signal("call_client",signal.SIGUSR1)
-    print("Calling client...")
+    logger.info("Calling client...")
 
 def hangup():
-    print("Hanging up call...")
-    afm.play(SoundType.CALL_END, threaded=True)
+    logger.info("Hanging up call...")
+    #afm.play(SoundType.CALL_END, threaded=True)
     call_shm.buf[:4] = struct.pack('i', CallSignal.END_CALL.value)  # signal hangup
     ipc.send_signal("call_client",signal.SIGUSR1)
     setMode("IDLE")
@@ -127,18 +127,20 @@ def mute_unmute():
     global muted
     muted = not muted
     if muted:
-        afm.play(SoundType.MUTED, threaded=True)
+        #afm.play(SoundType.MUTED, threaded=True)
+        pass
     else:
-        afm.play(SoundType.UNMUTED, threaded=True)
+        #afm.play(SoundType.UNMUTED, threaded=True)
+        pass
     call_shm.buf[:4] = struct.pack('i', CallSignal.MUTE_CALL.value)  # signal mute/unmute
     ipc.send_signal("call_client",signal.SIGUSR1)
-    print("Toggling mute/unmute...")
+    logger.info("Toggling mute/unmute...")
 
 def take_new_photo_and_ocr_client_to_queue():
-    afm.play(SoundType.TAKE_NEW_PHOTO_AND_ADD_TO_OCR, threaded=True)
+    #afm.play(SoundType.TAKE_NEW_PHOTO_AND_ADD_TO_OCR, threaded=True)
     ocr_shm.buf[:4] = struct.pack('i', OCRSignal.NEW_PICTURE.value)  # signal take new photo and OCR
     ipc.send_signal("ocr_process",signal.SIGUSR1)
-    print("Taking new photo and sending to OCR client queue...")
+    logger.info("Taking new photo and sending to OCR client queue...")
 
 def stop_ocr():
     ocr_shm.buf[:4] = struct.pack('i', OCRSignal.STOP_OCR.value)  # signal stop OCR
@@ -146,59 +148,62 @@ def stop_ocr():
         
 
 def pause_ocr():
-    afm.play(SoundType.PAUSE_OCR, threaded=True)
+   # afm.play(SoundType.PAUSE_OCR, threaded=True)
     ocr_shm.buf[:4] = struct.pack('i', OCRSignal.PAUSE_OCR.value)  # signal pause OCR
     ipc.send_signal("ocr_process",signal.SIGUSR1)
-    print("Pausing OCR...")
+    logger.info("Pausing OCR...")
 
 
 def ocr_queue_feedback(): # must be registered as a signal handler
     count = struct.unpack('i', oqc_shm.buf[:4])[0]
-    print(f"OCR Queue Count: {count}")
+    logger.info(f"OCR Queue Count: {count}")
     if count == 0:
-        afm.play(SoundType.STOP_OCR, threaded=True)
+        #afm.play(SoundType.STOP_OCR, threaded=True)
         setMode("IDLE")
-        print("Stopping OCR...")
+        logger.info("Stopping OCR...")
         ocr_shm.buf[:4] = struct.pack('i', OCRSignal.STOP_OCR_NOW.value)  # signal stop OCR now
         ipc.send_signal("ocr_process",signal.SIGUSR1)
     else:
         # audio feedback -> how many audio in queue
         audio_count = struct.unpack('i', oqi_shm.buf[:4])[0]
-        print(f"OCR Queue Images: {audio_count}")
+        logger.info(f"OCR Queue Images: {audio_count}")
         
 
 def ocr_mute_feedback(): # must be registered as a signal handler
-    print("OCR Mute/Unmute feedback received.")
+    logger.info("OCR Mute/Unmute feedback received.")
     queue_count = struct.unpack('i', oqc_shm.buf[:4])[0]
     queue_count_images = struct.unpack('i', oqi_shm.buf[:4])[0]
-    print(f"Playing sound for OCR Queue Count: {queue_count}")
-    print(f"OCR Queue Images for Mute/Unmute: {queue_count_images}")
+    logger.info(f"Playing sound for OCR Queue Count: {queue_count}")
+    logger.info(f"OCR Queue Images for Mute/Unmute: {queue_count_images}")
 
     if (queue_count>=6):
-        afm.sequential_play([
-            SoundType.MANY,
-            SoundType.GENERATED_AUDIO], 
-                            threaded=False)
+        # afm.sequential_play([
+        #     SoundType.MANY,
+        #     SoundType.GENERATED_AUDIO], 
+        #                     threaded=False)
+        pass
     elif (queue_count==0):
         pass
     else:
-        afm.sequential_play([
-            SoundType(queue_count),
-            SoundType.GENERATED_AUDIO                                                                                   
-            ], threaded=False)                                                                                                                       
+        # afm.sequential_play([
+        #     SoundType(queue_count),
+        #     SoundType.GENERATED_AUDIO                                                                                   
+        #     ], threaded=False)
+        pass                                                                                                                       
     if (queue_count_images >=6):
-        afm.sequential_play([
-            SoundType.MANY,
-            SoundType.PHOTOS_ARE_PROCESSING], 
-                            threaded=True)
+        # afm.sequential_play([
+        #     SoundType.MANY,
+        #     SoundType.PHOTOS_ARE_PROCESSING], 
+        #                     threaded=True)
+        pass
     elif (queue_count_images==0):
         pass
     else:
-        afm.sequential_play([
-            SoundType(queue_count_images),
-            SoundType.PHOTOS_ARE_PROCESSING                                                                                   
-            ], threaded=True)
-        
+        # afm.sequential_play([
+        #     SoundType(queue_count_images),
+        #     SoundType.PHOTOS_ARE_PROCESSING                                                                                   
+        #     ], threaded=True)
+        pass
 fn_mapping = {
     "roc": run_ocr_client,
     "cc": call_client,
@@ -206,7 +211,8 @@ fn_mapping = {
     "h": hangup,
     "m": mute_unmute,
     "tn": take_new_photo_and_ocr_client_to_queue,
-    "po": pause_ocr
+    "po": pause_ocr,
+    "IGNORE": None
 }
 
 
@@ -215,9 +221,9 @@ def find_bluetooth_device():
     """Find the Bluetooth input device"""
     while True:
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-        print("Available input devices:")
+        logger.info("Available input devices:")
         for i, device in enumerate(devices):
-            print(f"{i}: {device.path} - {device.name}")
+            logger.info(f"{i}: {device.path} - {device.name}")
 
         for device in devices:
             caps = device.capabilities()
@@ -226,27 +232,28 @@ def find_bluetooth_device():
                 # device name does not have hdmi
                 if "hdmi" in device.name.lower():
                     continue
-                if any(k in keys for k in [ecodes.KEY_PLAYPAUSE, ecodes.KEY_NEXTSONG, 
+                if any(k in keys for k in [ecodes.KEY_PLAYPAUSE, ecodes.KEY_NEXTSONG,
                                            ecodes.KEY_PREVIOUSSONG, ecodes.KEY_PLAYCD]):
-                    print(f"\nFound potential BT device: {device.name}")
-                    print(f"Path: {device.path}")
+                    logger.info(f"\nFound potential BT device: {device.name}")
+                    logger.info(f"Path: {device.path}")
                     return device
-        print("No Bluetooth input device found. Retrying in 10 seconds...")
+
+        logger.warning("No Bluetooth input device found. Retrying in 10 seconds...")
         time.sleep(10)
     
 def read_button_events(device):
     """Read and process button events"""
-    print(f"\nListening for button events on {device.name}...")
-    print("Press buttons on your headphones (Ctrl+C to exit)\n")
+    logger.info(f"\nListening for button events on {device.name}...")
+    logger.info("Press buttons on your headphones (Ctrl+C to exit)\n")
     
     try:
         for event in device.read_loop():
             if event.type == ecodes.EV_KEY:
                 key_event = categorize(event)
                 if key_event.keystate == key_event.key_down:
-                    print(event.code, 'pressed')
+                    logger.info(f"{event.code} pressed")
                     button = button_map.get(event.code, None)
-                    print(f"Button mapped to: {button}")
+                    logger.info(f"Button mapped to: {button}")
                     if button:
                         action = fn_mapping[mode_mapping[getMode()].get(button, None)]
                         if action:
@@ -255,15 +262,15 @@ def read_button_events(device):
                             else:
                                 action()
                     else:
-                        print(f"Unmapped button code: {event.code}")
+                        logger.warning(f"Unmapped button code: {event.code}")
     # handle if device is disconnected.
     except OSError as e:
-        print(f"\nDevice disconnected: {e}")
+        logger.exception(f"Device disconnected: {e}")
         find_bluetooth_device()
 
 def shared_memory_cleanup():
     global ocr_shm, call_shm
-    print("Cleaning up shared memory...")
+    logger.info("Cleaning up shared memory...")
     #ocr_shm.close()
     #self.create_pipeline_rpicamocr_shm.close()
     call_shm.close()
@@ -272,18 +279,18 @@ if __name__ == "__main__":
     try:
         ipc = IPC("earbud_input_signal")
         signal.signal(signal.SIGUSR1, ocr_queue_feedback)
-        signal.siginterrupt(signal.SIGUSR2, ocr_mute_feedback)
+        signal.signal(signal.SIGUSR2, ocr_mute_feedback)
         device = find_bluetooth_device()
         if device:
             read_button_events(device)
         else:
-            print("No Bluetooth input device found. Exiting.")
+            logger.error("No Bluetooth input device found. Exiting.")
             shared_memory_cleanup()
             sys.exit(1)
     except KeyboardInterrupt:
-        print("\nExiting Earbud Input Listener.")
+        logger.info("\nExiting Earbud Input Listener.")
     except Exception as e:
-        print(f"Error: {e}")
+        logger.exception(f"Error: {e}")
     finally:
         shared_memory_cleanup()
         ipc.cleanup()
