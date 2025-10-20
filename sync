@@ -1,6 +1,9 @@
 #!/bin/bash
 # sync_project.sh
 
+# A script to sync the project directory to a remote Raspberry Pi,
+# excluding files and directories specified in .piignore.
+
 PROJECT_DIR=$(pwd)
 DEST="pi@raspberrypi.lan:/home/pi/EyeWear"
 

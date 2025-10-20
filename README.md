@@ -1,211 +1,127 @@
-# Embedded OCR Pipeline (Raspberry Pi)
+# EyeWear — Raspberry Pi Zero 2 client for assistive smart glasses
 
-This folder hosts a minimal end-to-end pipeline for capturing images, sending
-them to an OCR service, routing the recognised text through Gemini for polishing, and (optionally) speaking the refined
-output via a local text-to-speech (TTS) handler. It is designed for resource-constrained devices such
-as Raspberry Pi Zero 2.
+A compact Raspberry Pi Zero 2 client intended to attach to eyeglasses for people with visual impairment. The device exposes two primary, earbud-button-driven features:
 
----
+1. OCR (optical character recognition) — capture photos and play spoken results.
+2. Live video calling — a prototype, industry-like calling feature for remote help or companion services.
 
-## Architecture Overview
+## Controls (via Bluetooth earbuds buttons)
 
-- **`bbocr_server/server.py`**  
-  Flask API handling RSA challenge–response authentication, receiving image uploads,
-  rendering Bangla OCR to HTML (via `pipeline_utils.py` with the full pipeline when
-  available, otherwise a pytesseract fallback), and requesting a Gemini summary.
+The client listens for button events from Bluetooth earbuds and maps them to actions depending on the current mode. Typical button mappings in the codebase:
 
-- **`ocr_client.py`**  
-  Command-line client that watches an image queue, authenticates with the server,
-  uploads images, and speaks Gemini-refined text when TTS is enabled.
+- Double tap: OCR / take action (mode dependent)
+- Long press: start call / stop OCR (mode dependent)
+- Single tap: mute/unmute or pause OCR (mode dependent)
 
-- **`tts_pipeline.py`**  
-  Lightweight TTS helper using Meta's MMS-TTS (`facebook/mms-tts-ben` by default); ingests Gemini-refined text and emits MP3 files (one per utterance).
+## High-level architecture
 
-- **Other Helpers**  
-  `take_image.py` captures camera stills; queue backends (POSIX message queue or filesystem) connect producers and the OCR client.
+- `earbud_input.py` — listens for the Bluetooth input device and converts button events into high-level commands. It writes small integer signals to POSIX shared memory and notifies worker processes via UNIX signals.
 
----
+- `ocr_process.py` / `pipeline.py` / `ocr_server.py` — OCR subsystem. `ocr_process.py` is the local client process which uses `pipeline.py` for image handling and processing. `ocr_server.py` contains (or coordinates with) the model/server side logic (the repo contains a `bbocr_server` directory with a model and utilities).
 
-## Prerequisites
+- `call_client.py` / `eyewear.py` — calling subsystem that implements the live video call client that talks to a prototype server. `eyewear.py` contains top-level wiring and helpers for running the device features.
 
-### Bangla OCR Assets
+- `audio_feedback.py` — plays pre-recorded or synthesized audio feedback (beeps, spoken numbers, status messages) through the Pi's audio interface.
 
-The high-accuracy pipeline expects the Bangla OCR models that ship with the
-larger project:
+- `earbud_emulator.py` — a helper/test utility to simulate earbud button events when you don't have a Bluetooth headset available.
 
-- `bnocr.onnx`
-- `best.pt`
+- `common.py` — shared constants, IPC helpers, enums and simple wrappers used across modules (shared memory names, signal values, mode helpers, etc.).
 
-Place them on the device and update the paths in `bbocr_server/pipeline.py`
-if they differ from the defaults.  
-If these files are missing, the server automatically falls back to
-`pytesseract`; accuracy on Bangla will be noticeably lower.
+- `sync` — helper script to sync files or environment on-device; used during development and deployment.
 
-1. **System Packages (Raspberry Pi OS / Debian)**
+## How signals, shared memory and multiprocessing queues are used
 
-   ```bash
-   sudo apt update
-   sudo apt install python3 python3-pip ffmpeg \
-       libblas-dev liblapack-dev libatlas-base-dev tesseract-ocr tesseract-ocr-ben
-   ```
+The project uses a small set of IPC primitives to keep the runtime efficient and simple on constrained hardware:
 
-   _Install `ffmpeg` for MP3 conversion. For TTS, install PyTorch/Transformers:_  
-   `pip3 install torch --index-url https://download.pytorch.org/whl/cpu`  
-   `pip3 install transformers accelerate`
+- POSIX shared memory (multiprocessing.shared_memory.SharedMemory):
 
-2. **MMS-TTS Configuration**
+  - Small fixed-size integer buffers are used to exchange numeric signals between processes (for example: `ocr_signal`, `call_signal`, `ocr_queue_count`, `ocr_queue_images`).
+  - Writing to shared memory is used to enqueue a compact command/state code that worker processes read and act upon.
 
-   `tts_pipeline.py` loads `facebook/mms-tts-ben` from Hugging Face. Set optional overrides before launching the client:
+- UNIX signals (signal.SIGUSR1, SIGUSR2, etc.):
 
-   ```bash
-   export MMS_TTS_MODEL_ID="facebook/mms-tts-ben"   # change to another MMS voice if desired
-   export MMS_TTS_DEVICE="cpu"                      # or 'cuda'
-   export MMS_TTS_DTYPE="float32"                   # fp16/bf16 supported on compatible hardware
-   export MMS_TTS_SPEAKER="speaker_id_or_name"      # optional for multi-speaker checkpoints
-   export TTS_OUTPUT_DIR="/path/to/store/mp3s"      # optional output directory (defaults to cwd)
-   ```
+  - After writing a value into shared memory, the initiating process sends a UNIX signal (SIGUSR1/SIGUSR2) to the target process to notify it that a new command is available. This keeps latency low and avoids busy-polling.
+  - Signal handlers are lightweight; they read the small shared memory integer and trigger worker behavior (for example, start/stop/pause OCR or update playback feedback).
 
-3. **(Recommended) Isolated Virtual Environment**
+- Multiprocessing queues (where used):
+  - Larger data or batches (for example: image buffers or items to process) are passed via multiprocessing queues when a structured handoff is needed.
+  - Queues provide a safe way for producers (camera thread/process) to hand off image data to consumers (OCR pipeline/process) while keeping processes isolated.
 
-   Because this project depends on specific versions of `torch`, `transformers`, and other packages that may conflict with globally installed tools, create a dedicated virtual environment before installing requirements:
+Why this combination?
 
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate         # on Windows use: .venv\Scripts\activate
-   pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+- Shared memory is fast and tiny for simple integer commands and counts.
+- UNIX signals provide a low-latency notification mechanism so workers wake only when needed.
+- Multiprocessing queues are used for bulkier payloads and maintain safe serialization across process boundaries.
 
-   When you are done working on the project, run `deactivate` to leave the environment.
+## Run / test (on-device)
 
-4. **Python Dependencies**
-
-   ```bash
-   pip3 install flask flask-cors requests pyjwt cryptography pillow pytesseract
-   pip3 install python-multipart  # only needed if the server runs under Uvicorn/FastAPI
-   ```
-
-5. **Environment Variables**
-   Copy `.env.local` (or create a new `.env`) under `embedded_base/bbocr_server`
-   providing at least:
-
-   ```*
-   GEMINI_API_KEY="your_google_genai_key"
-   GEMINI_MODEL="gemini-2.0-flash"  # or preferred model
-   GEMINI_RETRIES=3                 # optional: retry Gemini calls on 5xx
-   GEMINI_RETRY_DELAY=1.5           # optional: seconds between retries
-   ```
-
-   The server automatically loads `.env` and `.env.local` on startup.
-
----
-
-## Usage Guide
-
-| Step                 | Command                                                                                                                                               | Notes                                                                                                                      |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| 1. Start server      | `cd embedded_base/bbocr_server`<br>`export $(grep -v '^#' .env.local \| xargs)`<br>`SERVER_PORT=8080 python3 server.py > /tmp/bbocr_flask.log 2>&1 &` | Launches the Flask OCR service (loads Bangla models if available). Use another port if 8080 is busy.                       |
-| 2. Health check      | `curl -s http://127.0.0.1:8080/health`                                                                                                                | Confirms the server is listening.                                                                                          |
-| 3a. Queue image      | `python3 embedded_base/ocr_client.py --enqueue embedded_base/test_images/sample.jpg`                                                                  | Adds an image to the filesystem/POSIX queue. Repeat per image.                                                             |
-| 3b. Quick single-run | `python3 embedded_base/ocr_client.py --process-image embedded_base/test_images/sample.jpg --no-tts`                                                   | Skips the queue; authenticates, uploads once, prints OCR + Gemini response.                                                |
-| 4. Continuous client | `python3 embedded_base/ocr_client.py --no-tts --log-level INFO`                                                                                       | Consumes the queue, uploads images, prints raw OCR text.                                                                   |
-| 5. Review Gemini     | `tail -f /tmp/bbocr_flask.log`                                                                                                                        | Gemini Markdown summaries logged after each OCR result.                                                                    |
-| 6. Optional TTS      | `python3 embedded_base/ocr_client.py --log-level INFO`                                                                                                | Enables Bangla TTS with Gemini-refined text; ensure MMS env vars (`MMS_TTS_MODEL_ID`, etc.) are set if you need overrides. |
-
-### 1. Start the OCR Server
+Install dependencies (example; check `bbocr_server/requirements.txt` and other per-module requirements):
 
 ```bash
-cd embedded_base/bbocr_server
-export $(grep -v '^#' .env.local | xargs)  # loads Gemini variables
-SERVER_PORT=8080 python3 server.py > /tmp/bbocr_flask.log 2>&1 &
+# run these on Raspbian / Raspberry Pi OS (zsh / bash compatible)
+python3 -m pip install -r bbocr_server/requirements.txt
+python3 -m pip install evdev
 ```
 
-Verify it is running:
+Try the earbud input listener (interactive; will scan for input devices):
 
 ```bash
-curl -s http://127.0.0.1:8080/health
+python3 earbud_input.py
 ```
 
-If the requested port is already in use, the server logs a warning and falls back to the next available port (set `SERVER_PORT_AUTO=0` to disable this). To free the original port manually, either kill the existing process:
+Emulate earbud events for local testing:
 
 ```bash
-lsof -i tcp:8080
-kill <PID>
+python3 earbud_emulator.py
 ```
 
-or start the server on a different port (`SERVER_PORT=8081`).
-
-### 2. Queue Test Images
-
-Place images inside `embedded_base/test_images` (or any path accessible to the device),
-then enqueue each file:
+Start the OCR pipeline process (the real command depends on your configuration):
 
 ```bash
-python3 embedded_base/ocr_client.py --enqueue embedded_base/test_images/sample.jpg
+python3 ocr_process.py &
+# or run with your chosen supervisor (systemd, tmux, screen)
 ```
 
-Repeat for every image you want processed.
-
-> **Quick check:** to process a single image immediately (without using the queue), run  
-> `python3 embedded_base/ocr_client.py --process-image embedded_base/test_images/sample.jpg --no-tts`
-
-If you rely on the fallback OCR, set `BB_OCR_LANG=ben+eng` (or your preferred
-language combo) before starting the server to steer pytesseract.
-
-### 3. Run the OCR Client (without TTS)
+Start the call client (if configured):
 
 ```bash
-python3 embedded_base/ocr_client.py --no-tts --log-level INFO
+python3 call_client.py
 ```
 
-The client will:
+## Design notes and constraints
 
-1. Authenticate with the server (RSA challenge/response).
-2. Pull queued filenames, upload them via REST, and print the OCR text.
-3. Receive Gemini Markdown + `refined_text` (logged by the server and included in the JSON response).
+- The Pi Zero 2 is resource constrained. The architecture keeps compute-heavy work (model inference) either optimized locally in `bbocr_server/models` or offloaded to a more capable server depending on configuration.
+- Signals and small shared memory blocks minimize CPU usage and latency for simple control flows.
+- Be careful to close shared memory blocks and device file descriptors on shutdown to fully release hardware resources.
 
-Increase verbosity with `--log-level DEBUG` if you want to inspect full payloads.
-Press `Ctrl+C` to stop once the queue is empty.
+## Files of interest
 
-### 4. Inspect Gemini Output
+(quick single-line purpose for the files you asked about)
 
-Tail the server log to review Gemini summaries:
+- `ocr_process.py` — Local OCR client process; reacts to shared-memory signals and dispatches images through `pipeline.py`.
+- `ocr_server.py` — Server-side / model orchestration for OCR (models and heavy inference code live under `bbocr_server/`).
+- `pipeline.py` — Image capture/roi/cropping and pre/post-processing pipeline for OCR.
+- `call_client.py` — Live video calling client and call-control logic.
+- `audio_feedback.py` — Audio playback manager and list of available feedback sounds.
+- `earbud_emulator.py` — Simulates earbud button events for development/testing.
+- `earbud_input.py` — Bluetooth earbud button listener; maps button events to high-level actions and signals worker processes.
+- `common.py` — Enums, shared memory names, IPC helpers, and small utilities used by multiple processes.
+- `eyewear.py` — Top-level app wiring and helpers for starting the system in pre-defined configurations.
+- `sync` — Deployment / synchronization helper script.
 
-```bash
-tail -f /tmp/bbocr_flask.log
-```
+## Contributing
 
-Look for lines mentioning Gemini. The server now sends the Bangla HTML output to
-Gemini and logs the returned Markdown after spelling/grammar corrections.
+If you plan to extend or optimize the system:
 
-### 5. (Optional) Test TTS
+- Keep the IPC contract (shared memory names and integer codes) stable between modules.
+- Avoid blocking expensive work inside signal handlers; handlers should only read the small command and schedule work onto a worker/queue.
+- Add unit tests for `pipeline.py` image transforms and small integration tests for the end-to-end OCR flow.
 
-To generate MP3s for Gemini-refined Bangla text (skips audio if Gemini is disabled or returns nothing):
+## License & acknowledgements
 
-```bash
-python3 embedded_base/ocr_client.py --log-level INFO
-```
+See individual module headers and the `bbocr_server/LICENSE` for model and code licensing details.
 
-Ensure `tts_pipeline.py` can load the MMS-TTS checkpoint (`facebook/mms-tts-ben` by default) and that PyTorch/Transformers are installed. MP3 files are stored in `TTS_OUTPUT_DIR` (defaults to the client working directory).
+If you want, I can:
 
----
-
-## Troubleshooting Tips
-
-| Issue                           | Resolution                                                                                                                                                      |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `403 Forbidden` on client       | Confirm the client uses HTTP REST (`ocr_client.py`) and the server is running.                                                                                  |
-| `Signature verification failed` | Ensure both server and client use the updated `cryptography` version and that the device public key is registered (see `bbocr_server/authorized_devices.json`). |
-| Gemini errors in log            | Check that `GEMINI_API_KEY`/`GEMINI_MODEL` are set and valid; inspect `/tmp/bbocr_flask.log` for HTTP codes from the Gemini API.                                |
-| Bengali OCR accuracy is poor    | Verify `bnocr.onnx` and `best.pt` are present; without them the server uses the pytesseract fallback (requires `tesseract-ocr-ben`).                            |
-| Bluetooth/TTS silent            | Confirm the MMS model downloads succeed (check Hugging Face cache), `ffmpeg` is installed, and Gemini is returning `refined_text` in the OCR response.          |
-
----
-
-## Next Steps
-
-- Integrate the queue with your image capture pipeline (`take_image.py`).
-- Expand error handling or logging as needed for production.
-- When satisfied with OCR/Gemini behavior, enable the TTS pipeline for live audio feedback.
-
-This README focuses solely on the `embedded_base` workflow; see other project folders for additional integrations or legacy clients.
+- Add quick start/service unit files for systemd to run `ocr_process` and `earbud_input` at boot.
+- Create a small diagram showing the IPC flows (signals/shared memory/queues).

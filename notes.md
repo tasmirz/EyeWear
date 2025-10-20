@@ -3,3 +3,6 @@
    otherwise pulseaudio will snatch it
 
 Alike aplay, arecord; gstreamer cant find source by name, rather pass without any device name to get bt device by default
+
+
+need pulse audio for switching, and for vlc

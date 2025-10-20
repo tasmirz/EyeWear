@@ -1,3 +1,8 @@
+"""
+Handles authentication and communication with OCR pipeline.
+Provides endpoints for device challenge, authentication, image upload, and result retrieval(pooling).
+"""
+
 import os
 import secrets
 import tempfile
