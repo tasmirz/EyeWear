@@ -32,3 +32,7 @@ Download apisocr and paddleocr required models and place as such in your models 
     ├── inference.pdiparams.info
     └── inference.pdmodel
 ```
+
+to test `only_bbocr_pipeline.py`
+1. Run it using `python3.10 only_bbocr_pipeline.py`
+2. then run `python ../examples/test.py` to send image into queue.
